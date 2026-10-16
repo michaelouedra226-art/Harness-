@@ -1,0 +1,6 @@
+{
+  "name": "Nuru Studio AI",
+  "description": "Studio de création numérique mobile assisté par IA multi-agents et BYO-API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
