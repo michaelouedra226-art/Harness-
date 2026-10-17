@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.domain.model.ChatContentSanitizer
 import com.example.domain.model.AgentRole
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.MessageRole
@@ -38,6 +39,8 @@ fun ChatScreen(
 ) {
     val messages by viewModel.chatMessages.collectAsState()
     val agents by viewModel.agents.collectAsState()
+    val selectedProject by viewModel.selectedProject.collectAsState()
+    val activeFile by viewModel.activeFile.collectAsState()
     var inputText by remember { mutableStateOf("") }
     var selectedAgent by remember { mutableStateOf<AgentRole?>(null) }
     val context = LocalContext.current
@@ -63,7 +66,7 @@ fun ChatScreen(
                     FilterChip(
                         selected = selectedAgent == null,
                         onClick = { selectedAgent = null },
-                        label = { Text("Orchestrateur Tous") },
+                        label = { Text("Assistant général") },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = NuruViolet,
                             selectedLabelColor = PureWhite,
@@ -89,6 +92,38 @@ fun ChatScreen(
             }
         }
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Obsidian)
+                .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            val project = selectedProject
+            Text(
+                text = if (project == null) {
+                    "Contexte IA : aucun projet actif"
+                } else {
+                    "${project.name} · ${project.files.size} fichier(s) · extraits assainis transmis (max. 24 000 caractères)"
+                },
+                style = MaterialTheme.typography.labelSmall.copy(color = MutedText),
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(
+                onClick = {
+                    viewModel.switchTab(3)
+                    viewModel.switchIdeSubTab(0)
+                    activeFile?.let(viewModel::selectActiveFile)
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Fichiers", fontSize = 11.sp)
+            }
+        }
+
         // Messages List
         LazyColumn(
             modifier = Modifier
@@ -102,9 +137,9 @@ fun ChatScreen(
             items(messages) { message ->
                 ChatMessageBubble(
                     message = message,
-                    onCopy = {
+                    onCopy = { textToCopy ->
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("Nuru Message", message.content)
+                        val clip = ClipData.newPlainText("Nuru Message", textToCopy)
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "Texte copié dans le presse-papiers", Toast.LENGTH_SHORT).show()
                     }
@@ -244,9 +279,13 @@ fun ChatScreen(
 @Composable
 fun ChatMessageBubble(
     message: ChatMessage,
-    onCopy: () -> Unit
+    onCopy: (String) -> Unit
 ) {
     val isUser = message.role == MessageRole.USER
+    val visibleContent = if (isUser) message.content else ChatContentSanitizer.sanitize(
+        message.content,
+        filesWereSaved = message.autonomousActions.isNotEmpty()
+    )
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -273,7 +312,7 @@ fun ChatMessageBubble(
                 }
 
                 Text(
-                    text = message.agentRole?.title ?: "Orchestrateur Nuru",
+                    text = message.agentRole?.title ?: "Assistant Nuru",
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontWeight = FontWeight.Bold,
                         color = NebulaBlue
@@ -312,22 +351,32 @@ fun ChatMessageBubble(
                 .padding(14.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        color = PureWhite,
-                        lineHeight = 22.sp
+                if (message.isStreaming) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NuruViolet)
+                        Text(
+                            "L’IA analyse le contexte et prépare sa réponse. Le code apparaîtra dans les fichiers, pas ici.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                        )
+                    }
+                } else {
+                    Text(
+                        text = visibleContent,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = PureWhite,
+                            lineHeight = 22.sp
+                        )
                     )
-                )
+                }
 
-                if (!isUser) {
+                if (!isUser && !message.isStreaming) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
-                            onClick = onCopy,
+                            onClick = { onCopy(visibleContent) },
                             modifier = Modifier.size(28.dp)
                         ) {
                             Icon(

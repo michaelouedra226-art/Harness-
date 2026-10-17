@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -424,7 +425,12 @@ fun CodeEditorScreen(
                         .background(Color(0xFF07070D))
                         .padding(12.dp)
                 ) {
-                    val quickCommands = listOf("help", "run", "build", "test", "git status", "tree", "clear")
+                    Text(
+                        "Console interne : seules help, tree, status et clear sont exécutées. build, test, run et Git ne sont pas connectés.",
+                        style = MaterialTheme.typography.labelSmall.copy(color = AmberWarning),
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    val quickCommands = listOf("help", "tree", "status", "clear")
                     LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -495,7 +501,7 @@ fun CodeEditorScreen(
                         TextField(
                             value = terminalInput,
                             onValueChange = { terminalInput = it },
-                            placeholder = { Text("Entrez une commande (ex: build, test)...", fontSize = 12.sp, color = MutedText) },
+                            placeholder = { Text("Commande interne (help, tree, status)...", fontSize = 12.sp, color = MutedText) },
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
@@ -525,85 +531,38 @@ fun CodeEditorScreen(
             }
 
             3 -> {
-                // GIT TAB
                 Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp),
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Obsidian)
-                            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-                            .padding(16.dp)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(Icons.Default.AccountTree, contentDescription = null, tint = NebulaBlue)
-                                    Text("Branche active : main", fontWeight = FontWeight.Bold)
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(MintSuccess.copy(alpha = 0.2f))
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text("À jour", color = MintSuccess, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-
-                            Divider(color = GlassBorder)
-
-                            Text(
-                                text = "Fichiers versionnés :",
-                                style = MaterialTheme.typography.labelMedium.copy(color = Silver)
-                            )
-
-                            project.files.forEach { file ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = file.path,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.sp,
-                                        color = PureWhite
-                                    )
-                                    Text(
-                                        text = if (file.isModified) "MODIFIÉ" else "SYNCHRONISÉ",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (file.isModified) AmberWarning else MintSuccess
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Button(
-                        onClick = {
-                            viewModel.executeTerminalCommand("git commit -m 'Mise à jour via Nuru Code'")
-                            viewModel.switchIdeSubTab(2)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
-                        shape = RoundedCornerShape(12.dp),
+                    Surface(
+                        color = Obsidian,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, GlassBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.CloudUpload, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Créer un Snapshot / Commit Git", fontWeight = FontWeight.Bold)
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text("Git n’est pas connecté", fontWeight = FontWeight.Bold, color = PureWhite)
+                            Text(
+                                "Les fichiers de ce projet sont enregistrés dans l’application, mais aucun dépôt distant, aucune branche ni aucun commit Git n’est configuré. Aucun commit n’a été créé. ",
+                                style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                            )
+                            Text(
+                                "Pour l’instant, utilisez l’export ZIP du projet pour récupérer vos fichiers.",
+                                style = MaterialTheme.typography.bodySmall.copy(color = MutedText)
+                            )
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.switchIdeSubTab(0) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Ouvrir les fichiers du projet")
                     }
                 }
             }
@@ -913,4 +872,3 @@ fun buildMergedHtmlPreview(project: Project): String {
 
     return processed
 }
-

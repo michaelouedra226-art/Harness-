@@ -16,6 +16,17 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = NuruRepository(application.applicationContext)
 
+    private val quotedSecretAssignment = Regex(
+        """(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|authorization|private[_-]?key)[\"']?\s*[:=]\s*[\"'])([^\"'\r\n]+)([\"'])"""
+    )
+    private val plainSecretAssignment = Regex(
+        """(?im)^(\s*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|CLIENT[_-]?SECRET|SECRET|PASSWORD|AUTHORIZATION|PRIVATE[_-]?KEY)\s*[:=]\s*)\S+"""
+    )
+    private val commonSecretToken = Regex(
+        """(?i)(?:sk-[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{25,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"""
+    )
+    private val privateKeyBlock = Regex("(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----")
+
     init {
         viewModelScope.launch { repository.refreshConfiguredProviders() }
     }
@@ -50,7 +61,7 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     val activeFile = repository.activeFile
     val chatMessages = repository.chatMessages
 
-    // Project Generation Multi-Agent Orchestration State
+    // AI project generation state
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
 
@@ -232,9 +243,94 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendMessage(content: String, targetAgent: AgentRole? = null) {
+        val runtimeContext = buildRuntimeContext(targetAgent)
         viewModelScope.launch {
-            repository.sendUserMessageLive(content, targetAgent)
+            val destinationTab = repository.sendUserMessageLive(content, targetAgent, runtimeContext)
+            if (destinationTab != null) {
+                _currentTab.value = destinationTab
+                if (destinationTab == 3) _ideSubTab.value = 0
+            }
         }
+    }
+
+    private fun buildRuntimeContext(targetAgent: AgentRole?): String = buildString {
+        val tabName = when (_currentTab.value) {
+            0 -> "Accueil"
+            1 -> "Chat IA"
+            2 -> "Projets"
+            3 -> "Nuru Code"
+            4 -> "Studio Hub"
+            else -> "Écran inconnu"
+        }
+        appendLine("Application : Nuru Studio Android")
+        appendLine("Écran actif : $tabName (index ${_currentTab.value})")
+        if (_currentTab.value == 3) appendLine("Onglet IDE : ${listOf("Éditeur", "Aperçu", "Terminal", "Git").getOrElse(_ideSubTab.value) { "Inconnu" }}")
+        if (_currentTab.value == 4) appendLine("Onglet Studio Hub : ${listOf("Fournisseurs", "Modèles", "AI Router", "Agents").getOrElse(_hubSubTab.value) { "Inconnu" }}")
+        appendLine("Profil appelé : ${targetAgent?.title ?: "Assistant général (slot Architecte)"}")
+        appendLine("Connexion Internet disponible : ${repository.connectivityObserver.isOnline.value}")
+        appendLine("Écran d’aperçu plein écran : ${_isPreviewFullScreen.value}")
+        appendLine("Génération en cours : ${_isGenerating.value} | étape : ${_generationStep.value.ifBlank { "aucune" }} | erreur : ${_generationError.value ?: "aucune"}")
+        appendLine("Recherche modèles : '${_modelSearchQuery.value}' | filtre : ${_modelFilter.value}")
+        appendLine("Derniers événements du terminal : ${_terminalLogs.value.takeLast(10).joinToString(" | ").ifBlank { "aucun" }}")
+        appendLine("Sécurité : les clés de fournisseurs enregistrées ne sont jamais incluses; les fichiers manifestement sensibles sont exclus et les motifs courants de secrets masqués.")
+
+        val project = selectedProject.value
+        appendLine("Projets connus : ${projects.value.joinToString { it.name }.ifBlank { "aucun" }}")
+        if (project == null) {
+            appendLine("Projet actif : aucun")
+        } else {
+            appendLine("Projet actif : ${project.name} | type=${project.type.displayName} | état=${project.status.label}")
+            appendLine("Description du projet : ${project.description}")
+            appendLine("Nombre de fichiers : ${project.files.size}")
+            appendLine("Arborescence : ${project.files.joinToString { it.path }.ifBlank { "vide" }}")
+            appendLine("Fichier actif : ${activeFile.value?.path ?: "aucun"}")
+            appendLine("Contenu du projet (extrait, budget max. 24 000 caractères) :")
+            var remaining = 24_000
+            val orderedFiles = project.files.sortedByDescending { it.path == activeFile.value?.path }
+            var sensitiveFilesOmitted = false
+            for (file in orderedFiles) {
+                if (remaining <= 0) break
+                val fileName = file.path.substringAfterLast('/').lowercase()
+                val isSensitiveFile = fileName.startsWith(".env") || fileName.contains("secret") ||
+                    fileName.contains("credential") || fileName.endsWith(".pem") ||
+                    fileName.endsWith(".key") || fileName.endsWith(".keystore") || fileName == "local.properties"
+                if (isSensitiveFile) {
+                    sensitiveFilesOmitted = true
+                    appendLine("--- FILE ${file.path} : contenu sensible omis ---")
+                    continue
+                }
+                val safeContent = redactSecrets(file.content)
+                val snippet = safeContent.take(minOf(safeContent.length, remaining, 6_000))
+                appendLine("--- FILE ${file.path} (${file.language}) ---")
+                appendLine(snippet)
+                if (snippet.length < safeContent.length) appendLine("[Contenu tronqué pour respecter le budget de contexte]")
+                remaining -= snippet.length
+            }
+            if (sensitiveFilesOmitted) appendLine("[Le contenu de certains fichiers sensibles a été omis.]")
+            if (project.files.sumOf { it.content.length } > 24_000) {
+                appendLine("[Certains contenus de fichiers ne sont pas inclus. Utilise la liste des fichiers fournie et n’affirme pas avoir lu le contenu omis.]")
+            }
+        }
+
+        appendLine("Fournisseurs configurés :")
+        if (providers.value.isEmpty()) appendLine("- aucun")
+        providers.value.forEach { provider ->
+            appendLine("- ${provider.name} | type=${provider.type.displayName} | activé=${provider.isEnabled} | statut=${provider.testStatus} | modèles=${provider.modelsCount}")
+        }
+        appendLine("Modèles découverts : ${models.value.take(80).joinToString { "${it.name} (${it.providerName})" }.ifBlank { "aucun" }}")
+        appendLine("Modèles au-delà des 80 premiers : ${maxOf(0, models.value.size - 80)}")
+        appendLine("Routage des slots :")
+        routerConfig.value.slots.forEach { (slot, config) ->
+            val model = models.value.firstOrNull { it.id == config.assignedModelId }
+            appendLine("- ${slot.title} : ${model?.let { "${it.name} (${it.providerName})" } ?: "non configuré"}")
+        }
+    }
+
+    private fun redactSecrets(source: String): String {
+        var safe = privateKeyBlock.replace(source, "[PRIVATE KEY REDACTED]")
+        safe = quotedSecretAssignment.replace(safe) { match -> "${match.groupValues[1]}[REDACTED]${match.groupValues[3]}" }
+        safe = plainSecretAssignment.replace(safe) { match -> "${match.groupValues[1]}[REDACTED]" }
+        return commonSecretToken.replace(safe, "[REDACTED TOKEN]")
     }
 
     fun executeTerminalCommand(input: String) {

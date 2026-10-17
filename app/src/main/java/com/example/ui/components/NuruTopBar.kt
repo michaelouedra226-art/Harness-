@@ -25,7 +25,8 @@ import com.example.ui.theme.*
 @Composable
 fun NuruTopBar(
     currentTabTitle: String,
-    activeModelName: String = "Claude 3.7 Sonnet",
+    activeModelName: String = "Aucun modèle",
+    isModelReady: Boolean = false,
     onTuneClick: () -> Unit = {}
 ) {
     Surface(
@@ -114,7 +115,13 @@ fun NuruTopBar(
                             modifier = Modifier
                                 .size(6.dp)
                                 .clip(CircleShape)
-                                .background(MintSuccess)
+                                .background(
+                                    when {
+                                        activeModelName == "Aucun modèle" -> MutedText
+                                        isModelReady -> MintSuccess
+                                        else -> AmberWarning
+                                    }
+                                )
                         )
                         Text(
                             text = activeModelName.take(15),

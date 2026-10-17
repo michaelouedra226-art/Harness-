@@ -13,10 +13,10 @@ enum class ProjectType(
 
 enum class ProjectStatus(val label: String) {
     IDEA("Idée initiale"),
-    PLANNING("Planification multi-agents"),
+    PLANNING("Planification"),
     GENERATING("Génération en cours"),
-    READY("Prêt & Fonctionnel"),
-    ERROR("Erreur de compilation")
+    READY("Généré · à vérifier"),
+    ERROR("Erreur de génération")
 }
 
 data class ProjectFile(

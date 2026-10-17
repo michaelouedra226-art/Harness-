@@ -127,7 +127,7 @@ fun ProjectsScreen(
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = PureWhite)
                         )
                         Text(
-                            text = "Créez votre projet avec le bouton ci-dessous pour déclencher l'orchestration multi-agents en direct.",
+                            text = "Créez un projet. Le modèle affecté au slot Code générera les fichiers ; la compilation et les tests devront être lancés séparément.",
                             style = MaterialTheme.typography.bodySmall.copy(color = Silver),
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )

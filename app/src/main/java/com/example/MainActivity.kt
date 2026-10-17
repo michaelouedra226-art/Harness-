@@ -13,6 +13,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.domain.model.RouterSlotType
 import com.example.ui.components.CreateProjectDialog
 import com.example.ui.components.NuruBottomBar
 import com.example.ui.components.NuruTopBar
@@ -33,8 +34,17 @@ class MainActivity : ComponentActivity() {
                 val generationStep by viewModel.generationStep.collectAsState()
                 val generationProgress by viewModel.generationProgress.collectAsState()
                 val generationError by viewModel.generationError.collectAsState()
+                val models by viewModel.models.collectAsState()
+                val providers by viewModel.providers.collectAsState()
+                val routerConfig by viewModel.routerConfig.collectAsState()
                 val isPreviewFullScreen by viewModel.isPreviewFullScreen.collectAsState()
                 val selectedProject by viewModel.selectedProject.collectAsState()
+                val activeModel = routerConfig.slots[RouterSlotType.POWERFUL]?.assignedModelId
+                    ?.let { selectedId -> models.firstOrNull { it.id == selectedId } }
+                val activeModelName = activeModel?.name ?: "Aucun modèle"
+                val activeProvider = activeModel?.let { model -> providers.firstOrNull { it.id == model.providerId } }
+                val isModelReady = activeProvider?.isEnabled == true &&
+                    activeProvider.testStatus == com.example.domain.model.TestStatus.SUCCESS
 
                 var showCreateDialog by remember { mutableStateOf(false) }
 
@@ -72,6 +82,8 @@ class MainActivity : ComponentActivity() {
                         topBar = {
                             NuruTopBar(
                                 currentTabTitle = currentTabTitle,
+                                activeModelName = activeModelName,
+                                isModelReady = isModelReady,
                                 onTuneClick = {
                                     viewModel.switchTab(4)
                                     viewModel.switchHubSubTab(2) // Open AI Router

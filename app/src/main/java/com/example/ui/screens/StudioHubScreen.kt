@@ -171,7 +171,7 @@ fun StudioHubScreen(
                             TextField(
                                 value = searchQuery,
                                 onValueChange = { viewModel.setModelSearchQuery(it) },
-                                placeholder = { Text("Rechercher un modèle (Claude, GPT, DeepSeek...)", fontSize = 12.sp, color = MutedText) },
+                                placeholder = { Text("Rechercher parmi les modèles découverts...", fontSize = 12.sp, color = MutedText) },
                                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Silver) },
                                 colors = TextFieldDefaults.colors(
                                     focusedContainerColor = Graphite,
