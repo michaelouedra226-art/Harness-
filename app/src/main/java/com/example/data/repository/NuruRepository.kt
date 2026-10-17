@@ -1,7 +1,6 @@
 package com.example.data.repository
 
 import android.content.Context
-import com.example.BuildConfig
 import com.example.data.api.AIProviderClient
 import com.example.data.network.ConnectivityObserver
 import com.example.data.storage.NuruLocalStorage
@@ -25,11 +24,13 @@ class NuruRepository(
     val providers: StateFlow<List<AIProvider>> = _providers.asStateFlow()
 
     // Models
-    private val _models = MutableStateFlow<List<AIModel>>(initialCatalogModels())
+    private val _models = MutableStateFlow(storage.loadModels().filter { model ->
+        _providers.value.any { it.id == model.providerId }
+    })
     val models: StateFlow<List<AIModel>> = _models.asStateFlow()
 
     // Router Configuration
-    private val _routerConfig = MutableStateFlow(initialRouterConfig())
+    private val _routerConfig = MutableStateFlow(loadInitialRouterConfig())
     val routerConfig: StateFlow<AIRouterConfig> = _routerConfig.asStateFlow()
 
     // Agents
@@ -73,32 +74,33 @@ class NuruRepository(
                     testMessage = result.message,
                     latencyMs = result.latencyMs,
                     lastTestedAt = System.currentTimeMillis(),
-                    modelsCount = if (result.detectedModels.isNotEmpty()) result.detectedModels.size else it.modelsCount
+                    modelsCount = result.detectedModels.size
                 )
             } else it
         }
         _providers.value = updatedList
         storage.saveProviders(updatedList)
 
-        // Dynamically add real detected models from the API
+        // Replace this provider's cache with the IDs returned by its live models endpoint.
         if (result.detectedModels.isNotEmpty()) {
+            val oldModels = _models.value.filter { it.providerId == target.id }.associateBy { it.apiModelId }
             val discovered = result.detectedModels.map { modelId ->
+                val stableId = "${target.id}::$modelId"
                 AIModel(
-                    id = modelId,
+                    id = stableId,
+                    apiModelId = modelId,
                     providerId = target.id,
                     providerName = target.name,
                     name = modelId,
-                    contextWindow = "128K",
-                    tokensPerSec = 85,
-                    pricingInfo = "Selon compte API",
-                    hasVision = modelId.contains("vision", true) || modelId.contains("4o", true),
-                    hasCode = true,
-                    hasTools = true,
-                    isFast = modelId.contains("mini", true) || modelId.contains("flash", true)
+                    contextWindow = "Non communiqué",
+                    tokensPerSec = 0,
+                    pricingInfo = "Selon fournisseur",
+                    isFavorite = oldModels[modelId]?.isFavorite ?: false,
+                    description = "Identifiant récupéré en direct depuis ${target.baseUrl}."
                 )
             }
-            val existingIds = _models.value.map { it.id }.toSet()
-            _models.value = _models.value + discovered.filterNot { it.id in existingIds }
+            _models.value = _models.value.filterNot { it.providerId == target.id } + discovered
+            storage.saveModels(_models.value)
         }
 
         return result
@@ -114,20 +116,57 @@ class NuruRepository(
         val updated = _providers.value.map { if (it.id == provider.id) provider else it }
         _providers.value = updated
         storage.saveProviders(updated)
+        val updatedModels = _models.value.map {
+            if (it.providerId == provider.id) it.copy(providerName = provider.name) else it
+        }
+        _models.value = updatedModels
+        storage.saveModels(updatedModels)
+    }
+
+    suspend fun testModel(model: AIModel, prompt: String): Result<AIProviderClient.ChatResponse> {
+        val provider = _providers.value.firstOrNull { it.id == model.providerId }
+            ?: return Result.failure(IllegalStateException("Le fournisseur de ce modèle n’existe plus."))
+        return apiClient.sendChatCompletion(
+            provider = provider,
+            modelId = model.apiModelId,
+            systemPrompt = "Réponds brièvement au test de connexion.",
+            messages = listOf("user" to prompt),
+            temperature = 0.2f
+        )
     }
 
     fun deleteProvider(providerId: String) {
         val updated = _providers.value.filterNot { it.id == providerId }
         _providers.value = updated
         storage.saveProviders(updated)
+        val remainingModels = _models.value.filterNot { it.providerId == providerId }
+        _models.value = remainingModels
+        storage.saveModels(remainingModels)
+        val updatedSlots = _routerConfig.value.slots.mapValues { (_, config) ->
+            if (config.assignedModelId.startsWith("$providerId::")) {
+                config.copy(assignedModelId = "", assignedModelName = "")
+            } else config
+        }
+        _routerConfig.value = _routerConfig.value.copy(slots = updatedSlots)
+        storage.saveRouterConfig(_routerConfig.value)
     }
 
     // --- Model Explorer Actions ---
 
     fun toggleFavoriteModel(modelId: String) {
-        _models.value = _models.value.map {
+        val updated = _models.value.map {
             if (it.id == modelId) it.copy(isFavorite = !it.isFavorite) else it
         }
+        _models.value = updated
+        storage.saveModels(updated)
+    }
+
+    fun selectModelForAllSlots(model: AIModel) {
+        val slots = RouterSlotType.values().associateWith { slot ->
+            RouterSlotConfig(slot, model.id, model.name)
+        }
+        _routerConfig.value = _routerConfig.value.copy(slots = slots)
+        storage.saveRouterConfig(_routerConfig.value)
     }
 
     // --- Router Actions ---
@@ -136,6 +175,12 @@ class NuruRepository(
         val currentSlots = _routerConfig.value.slots.toMutableMap()
         currentSlots[slot] = RouterSlotConfig(slot, modelId, modelName)
         _routerConfig.value = _routerConfig.value.copy(slots = currentSlots)
+        storage.saveRouterConfig(_routerConfig.value)
+    }
+
+    suspend fun refreshConfiguredProviders() {
+        _providers.value.filter { it.apiKey.isNotBlank() || it.type == ProviderType.OLLAMA || it.type == ProviderType.CUSTOM }
+            .forEach { provider -> testProvider(provider.id) }
     }
 
     // --- Project Actions ---
@@ -174,14 +219,16 @@ class NuruRepository(
         type: ProjectType,
         onStepUpdate: (step: String, progress: Float) -> Unit
     ): Project = withContext(Dispatchers.IO) {
-        onStepUpdate("🏛 Architecte : Analyse du prompt et sélection du modèle...", 0.15f)
+        onStepUpdate("Préparation du prompt et résolution du modèle affecté au slot Code…", 0.15f)
+        var actualTokensUsed = 0
 
-        // Find active provider
-        val activeProvider = getActiveProvider()
+        val route = resolveProviderAndModel(RouterSlotType.CODE)
+            ?: throw IllegalStateException("Aucun modèle réel n’est affecté au slot Code. Ajoutez un fournisseur, récupérez ses modèles, puis choisissez-en un dans Studio Hub > AI Router.")
+        val activeProvider = route.first
+        val selectedModel = route.second
+        onStepUpdate("💻 Développeur : Génération en direct avec ${selectedModel.name} (${activeProvider.name})...", 0.40f)
 
-        val generatedFiles: List<ProjectFile> = if (activeProvider != null && (activeProvider.apiKey.isNotBlank() || activeProvider.type == ProviderType.OLLAMA)) {
-            onStepUpdate("💻 Développeur : Génération en direct via l'API ${activeProvider.name}...", 0.40f)
-
+        val generatedFiles: List<ProjectFile> = run {
             val prompt = """
 Tu es le moteur de développement de Nuru Studio AI.
 Génère le code source de production complet pour le projet suivant :
@@ -200,28 +247,22 @@ Pour un site web, inclus obligatoirement index.html (avec Tailwind CDN), styles.
             """.trimIndent()
 
             val messages = listOf("user" to prompt)
-            val modelId = getAssignedModelForSlot(RouterSlotType.CODE, activeProvider)
-
             val result = apiClient.sendChatCompletion(
                 provider = activeProvider,
-                modelId = modelId,
+                modelId = selectedModel.apiModelId,
                 systemPrompt = "Tu es un développeur senior. Génère du code propre, moderne et immédiatement fonctionnel.",
                 messages = messages,
                 temperature = 0.5f
             )
 
-            onStepUpdate("🧪 Testeur : Validation de la structure et découpage des fichiers...", 0.80f)
+            onStepUpdate("Validation du format de réponse et découpage des fichiers…", 0.80f)
 
-            if (result.isSuccess) {
-                val rawContent = result.getOrNull()?.content.orEmpty()
-                val parsed = parseFilesFromAIResponse(rawContent)
-                if (parsed.isNotEmpty()) parsed else generateProductionStarterFiles(name, type, description)
-            } else {
-                generateProductionStarterFiles(name, type, description)
-            }
-        } else {
-            onStepUpdate("⚙️ DevOps : Génération de l'arborescence native standard...", 0.60f)
-            generateProductionStarterFiles(name, type, description)
+            val response = result.getOrElse { throw it }
+            actualTokensUsed = response.tokensIn + response.tokensOut
+            val rawContent = response.content
+            val parsed = parseFilesFromAIResponse(rawContent)
+            if (parsed.isEmpty()) throw IllegalStateException("La réponse de ${selectedModel.name} ne contenait aucun fichier au format attendu.")
+            parsed
         }
 
         onStepUpdate("✅ Finalisation : Enregistrement et ouverture dans l'IDE...", 1.0f)
@@ -244,7 +285,7 @@ Pour un site web, inclus obligatoirement index.html (avec Tailwind CDN), styles.
                     filesCount = generatedFiles.size
                 )
             ),
-            tokensUsed = 12500,
+            tokensUsed = actualTokensUsed.toLong(),
             totalLinesOfCode = generatedFiles.sumOf { it.content.lines().size }
         )
 
@@ -272,15 +313,24 @@ Pour un site web, inclus obligatoirement index.html (avec Tailwind CDN), styles.
         val updatedWithUser = _chatMessages.value + userMsg
         _chatMessages.value = updatedWithUser
 
-        val activeProvider = getActiveProvider()
         val respondingAgent = targetAgent ?: AgentRole.ARCHITECT
+        val slot = respondingAgent.defaultModelSlot
+        val route = resolveProviderAndModel(slot)
 
-        if (activeProvider == null || (activeProvider.apiKey.isBlank() && activeProvider.type != ProviderType.OLLAMA)) {
+        if (route == null) {
+            val guidance = when {
+                _providers.value.none { it.apiKey.isNotBlank() || it.type == ProviderType.OLLAMA || it.type == ProviderType.CUSTOM } ->
+                    "Ajoutez un fournisseur et renseignez sa clé API dans Studio Hub > Fournisseurs."
+                _models.value.isEmpty() ->
+                    "Testez le fournisseur pour récupérer ses modèles, puis choisissez-en un dans Studio Hub > Modèles."
+                else ->
+                    "Aucun modèle n’est affecté au slot ${slot.title}. Choisissez un modèle dans Studio Hub > AI Router."
+            }
             val errorMsg = ChatMessage(
                 id = UUID.randomUUID().toString(),
                 role = MessageRole.SYSTEM,
                 agentRole = respondingAgent,
-                content = "⚠️ Aucun fournisseur IA actif n'a de clé API configurée.\n\nPour discuter et générer en temps réel, veuillez renseigner votre clé API dans **Studio Hub > Fournisseurs** (OpenAI, Gemini, Anthropic, DeepSeek, OpenRouter ou Ollama local).",
+                content = "⚠️ Aucun modèle prêt à l’emploi pour le slot ${slot.title}.\n\n$guidance",
                 timestamp = System.currentTimeMillis() + 100
             )
             val updatedWithError = updatedWithUser + errorMsg
@@ -289,8 +339,9 @@ Pour un site web, inclus obligatoirement index.html (avec Tailwind CDN), styles.
             return@withContext
         }
 
-        val slot = respondingAgent.defaultModelSlot
-        val modelId = getAssignedModelForSlot(slot, activeProvider)
+        val activeProvider = route.first
+        val selectedModel = route.second
+        val modelId = selectedModel.apiModelId
 
         val systemPrompt = """
 Tu es le moteur autonome et développeur senior de Nuru Studio AI (Agent ${respondingAgent.title}). Spécialité : ${respondingAgent.specialty}.
@@ -331,7 +382,7 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
             content = "",
             isStreaming = true,
             timestamp = System.currentTimeMillis(),
-            modelName = modelId
+            modelName = selectedModel.name
         )
         _chatMessages.value = updatedWithUser + streamingPlaceholder
 
@@ -377,8 +428,8 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
                 agentRole = respondingAgent,
                 content = finalContent,
                 timestamp = System.currentTimeMillis(),
-                modelName = modelId,
-                tokenCount = (response.content.length / 4),
+                modelName = selectedModel.name,
+                tokenCount = response.tokensOut,
                 isStreaming = false,
                 autonomousActions = actionRecords
             )
@@ -394,7 +445,7 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
                 id = assistantMsgId,
                 role = MessageRole.SYSTEM,
                 agentRole = respondingAgent,
-                content = "❌ Erreur de communication avec ${activeProvider.name} ($modelId) :\n$err\n\nVérifiez votre clé API et vos quotas.",
+                content = "❌ Erreur de communication avec ${activeProvider.name} (${selectedModel.name}) :\n$err\n\nVérifiez l’URL, le modèle sélectionné, les droits de la clé API et les quotas.",
                 timestamp = System.currentTimeMillis(),
                 isStreaming = false
             )
@@ -426,7 +477,15 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
             filesToCreate.add(m.groupValues[1].trim() to m.groupValues[2].trim())
         }
 
-        if (filesToCreate.isNotEmpty()) {
+        val safeFiles = filesToCreate.mapNotNull { (rawPath, content) ->
+            val path = ProjectPathValidator.normalizeRelativePath(rawPath)
+            if (path == null) {
+                actionsReport.add("Action ignorée : chemin non autorisé (`${rawPath.take(120)}`)")
+                null
+            } else path to content
+        }
+
+        if (safeFiles.isNotEmpty()) {
             var currentProj = _selectedProject.value
             if (currentProj == null) {
                 // Autonomously create a project if none is active
@@ -444,7 +503,7 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
             }
 
             val updatedFiles = currentProj.files.toMutableList()
-            filesToCreate.forEach { (path, content) ->
+            safeFiles.forEach { (path, content) ->
                 val name = path.substringAfterLast("/")
                 val ext = name.substringAfterLast(".", "")
                 val lang = when (ext.lowercase()) {
@@ -510,7 +569,8 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
 
     fun addNewFileToProject(path: String, content: String = "") {
         val currentProj = _selectedProject.value ?: return
-        val name = path.substringAfterLast("/")
+        val safePath = ProjectPathValidator.normalizeRelativePath(path) ?: return
+        val name = safePath.substringAfterLast("/")
         val ext = name.substringAfterLast(".", "")
         val lang = when (ext.lowercase()) {
             "html" -> "html"
@@ -522,8 +582,8 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
             "json" -> "json"
             else -> "text"
         }
-        val newFile = ProjectFile(path, name, ext, content, lang, isModified = true)
-        val updatedFiles = currentProj.files.filterNot { it.path == path } + newFile
+        val newFile = ProjectFile(safePath, name, ext, content, lang, isModified = true)
+        val updatedFiles = currentProj.files.filterNot { it.path == safePath } + newFile
         val updatedProj = currentProj.copy(
             files = updatedFiles,
             updatedAt = System.currentTimeMillis(),
@@ -551,26 +611,15 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
         storage.saveProjects(allProjects)
     }
 
-    private fun getActiveProvider(): AIProvider? {
-        val list = _providers.value
-        return list.find { it.isDefault && (it.apiKey.isNotBlank() || it.type == ProviderType.OLLAMA) }
-            ?: list.find { it.apiKey.isNotBlank() || it.type == ProviderType.OLLAMA }
-            ?: list.firstOrNull()
-    }
-
-    private fun getAssignedModelForSlot(slot: RouterSlotType, provider: AIProvider): String {
-        val slotConfig = _routerConfig.value.slots[slot]
-        if (slotConfig != null && slotConfig.assignedModelId.isNotBlank()) {
-            return slotConfig.assignedModelId
-        }
-        return when (provider.type) {
-            ProviderType.OPENAI_COMPATIBLE -> "gpt-4o"
-            ProviderType.GEMINI -> "gemini-2.5-flash"
-            ProviderType.ANTHROPIC -> "claude-3-5-sonnet-20241022"
-            ProviderType.DEEPSEEK -> "deepseek-coder"
-            ProviderType.OLLAMA -> "qwen2.5-coder:7b"
-            else -> "gpt-4o-mini"
-        }
+    private fun resolveProviderAndModel(slot: RouterSlotType): Pair<AIProvider, AIModel>? {
+        val selectedId = _routerConfig.value.slots[slot]?.assignedModelId?.takeIf { it.isNotBlank() }
+            ?: return null
+        val model = _models.value.firstOrNull { it.id == selectedId } ?: return null
+        val provider = _providers.value.firstOrNull { candidate ->
+            candidate.id == model.providerId && candidate.isEnabled &&
+                (candidate.apiKey.isNotBlank() || candidate.type == ProviderType.OLLAMA || candidate.type == ProviderType.CUSTOM)
+        } ?: return null
+        return provider to model
     }
 
     private fun parseFilesFromAIResponse(text: String): List<ProjectFile> {
@@ -579,7 +628,7 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
         val matches = regex.findAll(text)
 
         for (match in matches) {
-            val path = match.groupValues[1].trim()
+            val path = ProjectPathValidator.normalizeRelativePath(match.groupValues[1]) ?: continue
             val content = match.groupValues[2].trim()
             if (path.isNotBlank() && content.isNotBlank()) {
                 val name = path.substringAfterLast("/")
@@ -608,230 +657,7 @@ Tu peux créer plusieurs fichiers dans la même réponse. Les fichiers créés s
         return files
     }
 
-    private fun generateProductionStarterFiles(name: String, type: ProjectType, description: String): List<ProjectFile> {
-        val safeName = name.replace(" ", "_")
-        return when (type) {
-            ProjectType.WEB_SITE -> listOf(
-                ProjectFile(
-                    path = "index.html",
-                    name = "index.html",
-                    extension = "html",
-                    language = "html",
-                    content = """
-<!DOCTYPE html>
-<html lang="fr" class="scroll-smooth">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>$name · Nuru Studio</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body class="bg-[#0A0A12] text-white min-h-screen antialiased flex flex-col justify-between">
-    <header class="border-b border-white/10 px-6 py-4 flex justify-between items-center bg-[#14141F]/80 backdrop-blur">
-        <h1 class="text-xl font-bold bg-gradient-to-r from-[#6C4CF1] to-[#3D8BFF] bg-clip-text text-transparent">$name</h1>
-        <button class="px-4 py-2 bg-[#6C4CF1] text-xs font-semibold rounded-lg hover:opacity-90">Action</button>
-    </header>
-    <main class="max-w-4xl mx-auto px-6 py-16 text-center">
-        <h2 class="text-3xl md:text-5xl font-extrabold mb-4 tracking-tight">$name</h2>
-        <p class="text-gray-400 text-lg mb-8 max-w-xl mx-auto">$description</p>
-        <button onclick="handleMainAction()" class="px-6 py-3 rounded-xl font-bold bg-gradient-to-r from-[#6C4CF1] to-[#3D8BFF] shadow-lg shadow-[#6C4CF1]/30">Démarrer</button>
-    </main>
-    <footer class="border-t border-white/10 py-6 text-center text-xs text-gray-500">
-        Propulsé en temps réel par Nuru Studio AI
-    </footer>
-    <script src="app.js"></script>
-</body>
-</html>
-                    """.trimIndent()
-                ),
-                ProjectFile(
-                    path = "styles.css",
-                    name = "styles.css",
-                    extension = "css",
-                    language = "css",
-                    content = """
-/* Feuille de style $name */
-body { font-family: 'Plus Jakarta Sans', sans-serif; }
-                    """.trimIndent()
-                ),
-                ProjectFile(
-                    path = "app.js",
-                    name = "app.js",
-                    extension = "js",
-                    language = "javascript",
-                    content = """
-function handleMainAction() {
-    alert('$name prêt et fonctionnel.');
-}
-                    """.trimIndent()
-                )
-            )
-
-            ProjectType.MOBILE_FLUTTER -> listOf(
-                ProjectFile(
-                    path = "pubspec.yaml",
-                    name = "pubspec.yaml",
-                    extension = "yaml",
-                    language = "yaml",
-                    content = """
-name: ${safeName.lowercase()}
-description: $description
-publish_to: 'none'
-version: 1.0.0+1
-environment:
-  sdk: '>=3.0.0 <4.0.0'
-dependencies:
-  flutter:
-    sdk: flutter
-                    """.trimIndent()
-                ),
-                ProjectFile(
-                    path = "lib/main.dart",
-                    name = "main.dart",
-                    extension = "dart",
-                    language = "dart",
-                    content = """
-import 'package:flutter/material.dart';
-
-void main() => runApp(const ${safeName.replace("_", "")}App());
-
-class ${safeName.replace("_", "")}App extends StatelessWidget {
-  const ${safeName.replace("_", "")}App({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '$name',
-      theme: ThemeData.dark(),
-      home: Scaffold(
-        appBar: AppBar(title: const Text('$name')),
-        body: Center(child: Text('$description')),
-      ),
-    );
-  }
-}
-                    """.trimIndent()
-                )
-            )
-
-            ProjectType.MOBILE_KOTLIN_COMPOSE -> listOf(
-                ProjectFile(
-                    path = "MainActivity.kt",
-                    name = "MainActivity.kt",
-                    extension = "kt",
-                    language = "kotlin",
-                    content = """
-package com.nurustudio.$safeName
-
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            Text("$name : $description")
-        }
-    }
-}
-                    """.trimIndent()
-                )
-            )
-
-            ProjectType.SCRIPT_API -> listOf(
-                ProjectFile(
-                    path = "server.js",
-                    name = "server.js",
-                    extension = "js",
-                    language = "javascript",
-                    content = """
-const express = require('express');
-const app = express();
-app.use(express.json());
-
-app.get('/health', (req, res) => res.json({ status: 'ok', project: '$name' }));
-
-app.listen(3000, () => console.log('API $name sur port 3000'));
-                    """.trimIndent()
-                )
-            )
-        }
-    }
-
-    private fun loadInitialProviders(): List<AIProvider> {
-        val saved = storage.loadProviders()
-        if (saved.isNotEmpty()) return saved
-
-        // Check if GEMINI_API_KEY is available in BuildConfig
-        val geminiKey = try {
-            val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
-            val key = field.get(null) as? String
-            if (!key.isNullOrBlank() && key != "MY_GEMINI_API_KEY") key else ""
-        } catch (_: Exception) { "" }
-
-        return listOf(
-            AIProvider(
-                id = "prov-gemini",
-                name = "Google Gemini",
-                type = ProviderType.GEMINI,
-                baseUrl = "https://generativelanguage.googleapis.com/v1beta",
-                apiKey = geminiKey,
-                isEnabled = true,
-                isDefault = geminiKey.isNotBlank(),
-                testStatus = if (geminiKey.isNotBlank()) TestStatus.SUCCESS else TestStatus.UNTESTED,
-                testMessage = if (geminiKey.isNotBlank()) "Clé injectée depuis l'environnement" else "Clé API requise"
-            ),
-            AIProvider(
-                id = "prov-openai",
-                name = "OpenAI",
-                type = ProviderType.OPENAI_COMPATIBLE,
-                baseUrl = "https://api.openai.com/v1",
-                apiKey = "",
-                isEnabled = true,
-                isDefault = false,
-                testStatus = TestStatus.UNTESTED,
-                testMessage = "Renseignez votre clé API"
-            ),
-            AIProvider(
-                id = "prov-anthropic",
-                name = "Anthropic Claude",
-                type = ProviderType.ANTHROPIC,
-                baseUrl = "https://api.anthropic.com/v1",
-                apiKey = "",
-                isEnabled = true,
-                isDefault = false,
-                testStatus = TestStatus.UNTESTED,
-                testMessage = "Renseignez votre clé API"
-            ),
-            AIProvider(
-                id = "prov-deepseek",
-                name = "DeepSeek",
-                type = ProviderType.DEEPSEEK,
-                baseUrl = "https://api.deepseek.com/v1",
-                apiKey = "",
-                isEnabled = true,
-                isDefault = false,
-                testStatus = TestStatus.UNTESTED,
-                testMessage = "Renseignez votre clé API"
-            ),
-            AIProvider(
-                id = "prov-ollama",
-                name = "Ollama Local (Offline)",
-                type = ProviderType.OLLAMA,
-                baseUrl = "http://127.0.0.1:11434/api",
-                apiKey = "",
-                isEnabled = true,
-                isDefault = false,
-                testStatus = TestStatus.UNTESTED,
-                testMessage = "Serveur local"
-            )
-        )
-    }
+    private fun loadInitialProviders(): List<AIProvider> = storage.loadProviders()
 
     private fun loadInitialProjects(): List<Project> {
         return storage.loadProjects()
@@ -850,112 +676,15 @@ app.listen(3000, () => console.log('API $name sur port 3000'));
         )
     }
 
-    private fun initialCatalogModels(): List<AIModel> = listOf(
-        AIModel(
-            id = "gemini-2.5-flash",
-            providerId = "prov-gemini",
-            providerName = "Google Gemini",
-            name = "Gemini 2.5 Flash",
-            contextWindow = "1M",
-            tokensPerSec = 140,
-            pricingInfo = "Selon compte",
-            hasVision = true,
-            hasCode = true,
-            hasTools = true,
-            isFast = true,
-            isReasoning = false,
-            isFavorite = true,
-            description = "Modèle ultra-rapide et multimodal avec large contexte."
-        ),
-        AIModel(
-            id = "gemini-2.5-pro",
-            providerId = "prov-gemini",
-            providerName = "Google Gemini",
-            name = "Gemini 2.5 Pro",
-            contextWindow = "1M",
-            tokensPerSec = 75,
-            pricingInfo = "Selon compte",
-            hasVision = true,
-            hasCode = true,
-            hasTools = true,
-            isFast = false,
-            isReasoning = true,
-            isFavorite = true,
-            description = "Raisonnement avancé et écriture de code complexe."
-        ),
-        AIModel(
-            id = "gpt-4o",
-            providerId = "prov-openai",
-            providerName = "OpenAI",
-            name = "GPT-4o",
-            contextWindow = "128K",
-            tokensPerSec = 90,
-            pricingInfo = "Selon compte",
-            hasVision = true,
-            hasCode = true,
-            hasTools = true,
-            isFast = false,
-            isReasoning = false,
-            isFavorite = true,
-            description = "Polyvalent et multimodal pour code et architecture."
-        ),
-        AIModel(
-            id = "gpt-4o-mini",
-            providerId = "prov-openai",
-            providerName = "OpenAI",
-            name = "GPT-4o Mini",
-            contextWindow = "128K",
-            tokensPerSec = 150,
-            pricingInfo = "Économique",
-            hasVision = true,
-            hasCode = true,
-            hasTools = true,
-            isFast = true,
-            isReasoning = false,
-            isFavorite = true,
-            description = "Ultra-rapide pour requêtes conversationnelles courtes."
-        ),
-        AIModel(
-            id = "claude-3-5-sonnet-20241022",
-            providerId = "prov-anthropic",
-            providerName = "Anthropic",
-            name = "Claude 3.5 Sonnet",
-            contextWindow = "200K",
-            tokensPerSec = 80,
-            pricingInfo = "Selon compte",
-            hasVision = true,
-            hasCode = true,
-            hasTools = true,
-            isFast = false,
-            isReasoning = true,
-            isFavorite = true,
-            description = "Excellence reconnue pour le code et l'analyse."
-        ),
-        AIModel(
-            id = "deepseek-coder",
-            providerId = "prov-deepseek",
-            providerName = "DeepSeek",
-            name = "DeepSeek Coder",
-            contextWindow = "128K",
-            tokensPerSec = 100,
-            pricingInfo = "Très économique",
-            hasVision = false,
-            hasCode = true,
-            hasTools = true,
-            isFast = true,
-            isReasoning = false,
-            isFavorite = true,
-            description = "Spécialisé dans la programmation et le refactoring."
-        )
-    )
+    private fun loadInitialRouterConfig(): AIRouterConfig {
+        val saved = storage.loadRouterConfig()
+        val slots = RouterSlotType.values().associateWith { slot ->
+            val config = saved?.slots?.get(slot)
+            val selectedModel = config?.assignedModelId?.let { id -> _models.value.firstOrNull { it.id == id } }
+            if (config != null && selectedModel != null) config
+            else RouterSlotConfig(slot = slot, assignedModelId = "", assignedModelName = "")
+        }
+        return (saved ?: AIRouterConfig(slots = slots)).copy(slots = slots)
+    }
 
-    private fun initialRouterConfig(): AIRouterConfig = AIRouterConfig(
-        slots = mapOf(
-            RouterSlotType.FAST to RouterSlotConfig(RouterSlotType.FAST, "gemini-2.5-flash", "Gemini 2.5 Flash"),
-            RouterSlotType.POWERFUL to RouterSlotConfig(RouterSlotType.POWERFUL, "gemini-2.5-pro", "Gemini 2.5 Pro"),
-            RouterSlotType.CODE to RouterSlotConfig(RouterSlotType.CODE, "deepseek-coder", "DeepSeek Coder"),
-            RouterSlotType.VISION to RouterSlotConfig(RouterSlotType.VISION, "gemini-2.5-pro", "Gemini 2.5 Pro"),
-            RouterSlotType.CREATIVE to RouterSlotConfig(RouterSlotType.CREATIVE, "gpt-4o", "GPT-4o")
-        )
-    )
 }

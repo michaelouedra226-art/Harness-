@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.model.*
@@ -129,13 +130,23 @@ fun StudioHubScreen(
                         }
                     }
 
-                    items(providers) { provider ->
-                        ProviderCard(
-                            provider = provider,
-                            onTest = { viewModel.testProvider(provider.id) },
-                            onEditKey = { editingKeyProvider = provider },
-                            onDelete = { viewModel.deleteProvider(provider.id) }
-                        )
+                    if (providers.isEmpty()) {
+                        item {
+                            Text(
+                                "Aucun fournisseur n’est préconfiguré. Ajoutez votre propre endpoint et votre clé API pour charger les modèles disponibles.",
+                                style = MaterialTheme.typography.bodyMedium.copy(color = Silver),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
+                            )
+                        }
+                    } else {
+                        items(providers) { provider ->
+                            ProviderCard(
+                                provider = provider,
+                                onTest = { viewModel.testProvider(provider.id) },
+                                onEditKey = { editingKeyProvider = provider },
+                                onDelete = { viewModel.deleteProvider(provider.id) }
+                            )
+                        }
                     }
                 }
             }
@@ -217,12 +228,28 @@ fun StudioHubScreen(
                         matchesSearch && matchesFilter
                     }
 
-                    items(filteredModels) { model ->
-                        ModelCard(
-                            model = model,
-                            onToggleFavorite = { viewModel.toggleFavoriteModel(model.id) },
-                            onTest = { testingModel = model }
-                        )
+                    if (filteredModels.isEmpty()) {
+                        item {
+                            Text(
+                                text = if (models.isEmpty()) {
+                                    "Aucun modèle enregistré. Ajoutez un fournisseur ou testez sa connexion : les identifiants renvoyés par son API apparaîtront ici."
+                                } else {
+                                    "Aucun modèle ne correspond à cette recherche ou à ce filtre."
+                                },
+                                style = MaterialTheme.typography.bodyMedium.copy(color = Silver),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
+                            )
+                        }
+                    } else {
+                        items(filteredModels) { model ->
+                            ModelCard(
+                                model = model,
+                                onToggleFavorite = { viewModel.toggleFavoriteModel(model.id) },
+                                onTest = { testingModel = model },
+                                onSelect = { viewModel.selectModel(model) },
+                                isSelected = routerConfig.slots.values.any { it.assignedModelId == model.id }
+                            )
+                        }
                     }
                 }
             }
@@ -243,7 +270,7 @@ fun StudioHubScreen(
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
-                                text = "Affectez le meilleur modèle à chaque type de tâche avec fallback automatique",
+                                text = "Affectez un modèle réel à chaque type de tâche. Aucune valeur de modèle implicite n’est utilisée.",
                                 style = MaterialTheme.typography.bodySmall.copy(color = Silver)
                             )
                         }
@@ -271,18 +298,12 @@ fun StudioHubScreen(
                         ) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "Chaîne de Secours (Fallback Chain)",
+                                    text = "Gestion des erreurs API",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp
                                 )
                                 Text(
-                                    text = "1. 🧠 Puissant  ➔  2. 💻 Code  ➔  3. ⚡ Rapide  ➔  4. Ollama Local",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    color = NebulaBlue
-                                )
-                                Text(
-                                    text = "En cas de quota dépassé (429) ou timeout serveur, Nuru bascule automatiquement sans interrompre la session.",
+                                    text = "Une erreur est affichée directement. Aucun changement de modèle n’est effectué sans votre choix.",
                                     style = MaterialTheme.typography.bodySmall.copy(color = Silver, fontSize = 11.sp)
                                 )
                             }
@@ -303,11 +324,11 @@ fun StudioHubScreen(
                     item {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                text = "Équipe Multi-Agents Spécialisés",
+                                text = "Profils d’agents spécialisés",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
-                                text = "Chaque agent possède un rôle précis et collabore via un bus DAG",
+                                text = "Chaque profil applique un rôle spécialisé et utilise le modèle affecté à son slot.",
                                 style = MaterialTheme.typography.bodySmall.copy(color = Silver)
                             )
                         }
@@ -343,7 +364,8 @@ fun StudioHubScreen(
         val model = testingModel!!
         TestModelDialog(
             model = model,
-            onDismiss = { testingModel = null }
+            onDismiss = { testingModel = null },
+            onTest = { prompt, onResult -> viewModel.testModel(model, prompt, onResult) }
         )
     }
 
@@ -367,10 +389,9 @@ fun StudioHubScreen(
         EditKeyDialog(
             provider = prov,
             onDismiss = { editingKeyProvider = null },
-            onSave = { newKey ->
-                viewModel.updateProviderApiKey(prov.id, newKey)
+            onSave = { baseUrl, apiKey ->
+                viewModel.updateProviderSettings(prov.id, baseUrl, apiKey)
                 editingKeyProvider = null
-                viewModel.testProvider(prov.id)
             }
         )
     }
@@ -380,9 +401,10 @@ fun StudioHubScreen(
 fun EditKeyDialog(
     provider: AIProvider,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit
+    onSave: (baseUrl: String, apiKey: String) -> Unit
 ) {
-    var key by remember { mutableStateOf(provider.apiKey) }
+    var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
+    var key by remember(provider.id) { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -393,15 +415,28 @@ fun EditKeyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Collez votre vraie clé API pour ce fournisseur. Elle sera sauvegardée localement sur votre appareil et utilisée en temps réel.",
+                    text = "Modifiez l’URL de base et la clé du fournisseur. La clé actuelle n’est pas affichée ; laissez le champ vide pour la conserver.",
                     style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                )
+
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = { Text("URL de base") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = PureWhite,
+                        unfocusedTextColor = PureWhite,
+                        focusedBorderColor = NuruViolet
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 )
 
                 OutlinedTextField(
                     value = key,
                     onValueChange = { key = it },
-                    label = { Text("Clé API") },
-                    placeholder = { Text("sk-... ou AIza...") },
+                    label = { Text("Nouvelle clé API") },
+                    placeholder = { Text("Vide = conserver la clé actuelle") },
+                    visualTransformation = PasswordVisualTransformation(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = PureWhite,
                         unfocusedTextColor = PureWhite,
@@ -413,7 +448,7 @@ fun EditKeyDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSave(key.trim()) },
+                onClick = { onSave(baseUrl.trim(), key.trim()) },
                 colors = ButtonDefaults.buttonColors(containerColor = NuruViolet)
             ) {
                 Text("Enregistrer & Tester")
@@ -540,7 +575,7 @@ fun ProviderCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = if (provider.apiKey.isNotBlank()) "Clé: ${provider.apiKey.take(6)}••••" else "Aucune clé",
+                        text = if (provider.apiKey.isNotBlank()) "Clé configurée" else "Aucune clé",
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
                         color = if (provider.apiKey.isNotBlank()) MintSuccess else AmberWarning
@@ -564,7 +599,7 @@ fun ProviderCard(
 
                     Button(
                         onClick = onTest,
-                        colors = ButtonDefaults.buttonColors(containerColor = if (provider.apiKey.isNotBlank() || provider.type == ProviderType.OLLAMA) NuruViolet else SlateElevated),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (provider.apiKey.isNotBlank() || provider.type == ProviderType.OLLAMA || provider.type == ProviderType.CUSTOM) NuruViolet else SlateElevated),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         modifier = Modifier.height(28.dp)
@@ -583,7 +618,9 @@ fun ProviderCard(
 fun ModelCard(
     model: AIModel,
     onToggleFavorite: () -> Unit,
-    onTest: () -> Unit
+    onTest: () -> Unit,
+    onSelect: () -> Unit,
+    isSelected: Boolean
 ) {
     Box(
         modifier = Modifier
@@ -643,10 +680,23 @@ fun ModelCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 ModelFeatureBadge(label = "Ctx: ${model.contextWindow}")
-                ModelFeatureBadge(label = "${model.tokensPerSec} tok/s")
+                if (model.tokensPerSec > 0) ModelFeatureBadge(label = "${model.tokensPerSec} tok/s")
                 if (model.hasVision) ModelFeatureBadge(label = "👁 Vision", color = NebulaBlue)
                 if (model.hasCode) ModelFeatureBadge(label = "💻 Code", color = MintSuccess)
                 if (model.isReasoning) ModelFeatureBadge(label = "🧠 Raisonnement", color = NuruViolet)
+            }
+
+            Button(
+                onClick = onSelect,
+                colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (isSelected) "Modèle sélectionné pour les agents" else "Utiliser ce modèle pour les agents",
+                    fontSize = 12.sp,
+                    color = PureWhite
+                )
             }
         }
     }
@@ -711,7 +761,7 @@ fun RouterSlotCard(
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = "Modèle actif : ${config?.assignedModelName ?: "Non assigné"}",
+                        text = "Modèle actif : ${config?.assignedModelName?.takeIf { it.isNotBlank() } ?: "Non assigné"}",
                         style = MaterialTheme.typography.labelSmall.copy(
                             color = NebulaBlue,
                             fontWeight = FontWeight.Bold
@@ -808,6 +858,7 @@ fun AddProviderDialog(
     var selectedType by remember { mutableStateOf(ProviderType.OPENAI_COMPATIBLE) }
     var baseUrl by remember { mutableStateOf(ProviderType.OPENAI_COMPATIBLE.defaultBaseUrl) }
     var apiKey by remember { mutableStateOf("") }
+    var typeMenuExpanded by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -817,6 +868,27 @@ fun AddProviderDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box {
+                    OutlinedButton(onClick = { typeMenuExpanded = true }) {
+                        Text("Type : ${selectedType.displayName}", color = PureWhite)
+                    }
+                    DropdownMenu(
+                        expanded = typeMenuExpanded,
+                        onDismissRequest = { typeMenuExpanded = false }
+                    ) {
+                        ProviderType.values().forEach { type ->
+                            DropdownMenuItem(
+                                text = { Text(type.displayName) },
+                                onClick = {
+                                    selectedType = type
+                                    baseUrl = type.defaultBaseUrl
+                                    typeMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -844,13 +916,18 @@ fun AddProviderDialog(
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
-                    label = { Text("Clé API (Optionnel pour local)") },
+                    label = { Text("Clé API (facultative pour local/personnalisé)") },
+                    visualTransformation = PasswordVisualTransformation(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = PureWhite,
                         unfocusedTextColor = PureWhite,
                         focusedBorderColor = NuruViolet
                     ),
                     modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "Après l’enregistrement, l’application interroge cette API et affiche les modèles qu’elle renvoie.",
+                    style = MaterialTheme.typography.bodySmall.copy(color = Silver)
                 )
             }
         },
@@ -873,7 +950,8 @@ fun AddProviderDialog(
 @Composable
 fun TestModelDialog(
     model: AIModel,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onTest: (prompt: String, onResult: (String) -> Unit) -> Unit
 ) {
     var prompt by remember { mutableStateOf("Explique le principe de Clean Architecture en 2 phrases.") }
     var responseOutput by remember { mutableStateOf<String?>(null) }
@@ -929,13 +1007,17 @@ fun TestModelDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    if (prompt.isBlank() || isTesting) return@Button
                     isTesting = true
-                    responseOutput = "200 OK en 148ms | Réponse : La Clean Architecture sépare le domaine, les cas d'usage et l'infrastructure pour assurer testabilité et indépendance vis-à-vis des frameworks."
-                    isTesting = false
+                    responseOutput = null
+                    onTest(prompt.trim()) { output ->
+                        responseOutput = output
+                        isTesting = false
+                    }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = NuruViolet)
             ) {
-                Text("Exécuter Test")
+                Text(if (isTesting) "Appel en cours…" else "Tester via l’API")
             }
         },
         dismissButton = {

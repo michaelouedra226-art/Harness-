@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.repository.NuruRepository
 import com.example.domain.model.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,6 +15,10 @@ import java.util.UUID
 class NuruViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = NuruRepository(application.applicationContext)
+
+    init {
+        viewModelScope.launch { repository.refreshConfiguredProviders() }
+    }
 
     // Tab Navigation: 0 = Home, 1 = Chat, 2 = Projects, 3 = Code/Preview, 4 = Studio Hub
     private val _currentTab = MutableStateFlow(0)
@@ -55,12 +60,15 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     private val _generationProgress = MutableStateFlow(0f)
     val generationProgress: StateFlow<Float> = _generationProgress.asStateFlow()
 
+    private val _generationError = MutableStateFlow<String?>(null)
+    val generationError: StateFlow<String?> = _generationError.asStateFlow()
+
     // Preview Full Screen Mode
     private val _isPreviewFullScreen = MutableStateFlow(false)
     val isPreviewFullScreen: StateFlow<Boolean> = _isPreviewFullScreen.asStateFlow()
 
     // Terminal History
-    private val _terminalLogs = MutableStateFlow(listOf("Nuru Studio AI Terminal v1.0", "Type 'help' for commands."))
+    private val _terminalLogs = MutableStateFlow(listOf("Terminal de projet — aperçu local uniquement.", "Type 'help' for available commands."))
     val terminalLogs: StateFlow<List<String>> = _terminalLogs.asStateFlow()
 
     fun switchTab(tab: Int) {
@@ -106,12 +114,24 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
             testStatus = TestStatus.UNTESTED,
             testMessage = "Prêt à être testé"
         )
-        repository.addProvider(newProvider)
+        viewModelScope.launch {
+            repository.addProvider(newProvider)
+            repository.testProvider(newProvider.id)
+        }
     }
 
-    fun updateProviderApiKey(providerId: String, newKey: String) {
+    fun updateProviderSettings(providerId: String, baseUrl: String, newKey: String) {
         val current = providers.value.find { it.id == providerId } ?: return
-        repository.updateProvider(current.copy(apiKey = newKey, testStatus = TestStatus.UNTESTED, testMessage = "Clé mise à jour"))
+        val updated = current.copy(
+            baseUrl = baseUrl.trim(),
+            apiKey = newKey.ifBlank { current.apiKey },
+            testStatus = TestStatus.UNTESTED,
+            testMessage = "Configuration mise à jour"
+        )
+        viewModelScope.launch {
+            repository.updateProvider(updated)
+            repository.testProvider(providerId)
+        }
     }
 
     fun deleteProvider(providerId: String) {
@@ -120,6 +140,17 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleFavoriteModel(modelId: String) {
         repository.toggleFavoriteModel(modelId)
+    }
+
+    fun selectModel(model: AIModel) {
+        repository.selectModelForAllSlots(model)
+    }
+
+    fun testModel(model: AIModel, prompt: String, onComplete: (String) -> Unit) {
+        viewModelScope.launch {
+            val result = repository.testModel(model, prompt)
+            onComplete(result.fold({ it.content }, { "Erreur : ${it.localizedMessage ?: "échec de l’appel API"}" }))
+        }
     }
 
     fun updateRouterSlot(slot: RouterSlotType, modelId: String, modelName: String) {
@@ -169,24 +200,35 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             _isGenerating.value = true
+            _generationError.value = null
             _generationProgress.value = 0.05f
             _generationStep.value = "Initialisation de la tâche..."
 
-            repository.createProjectWithRealAI(
-                name = name,
-                description = description,
-                type = type,
-                onStepUpdate = { step, progress ->
-                    _generationStep.value = step
-                    _generationProgress.value = progress
-                }
-            )
-
-            _isGenerating.value = false
-            _currentTab.value = 3 // Jump to Nuru Code
-            _ideSubTab.value = 1  // Live Preview
-            onComplete()
+            try {
+                repository.createProjectWithRealAI(
+                    name = name,
+                    description = description,
+                    type = type,
+                    onStepUpdate = { step, progress ->
+                        _generationStep.value = step
+                        _generationProgress.value = progress
+                    }
+                )
+                _currentTab.value = 3
+                _ideSubTab.value = 1
+                onComplete()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                _generationError.value = e.localizedMessage ?: "La génération du projet a échoué."
+            } finally {
+                _isGenerating.value = false
+            }
         }
+    }
+
+    fun clearGenerationError() {
+        _generationError.value = null
     }
 
     fun sendMessage(content: String, targetAgent: AgentRole? = null) {
@@ -204,28 +246,25 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
         val mainCmd = parts.firstOrNull()?.lowercase() ?: ""
         when (mainCmd) {
             "help" -> {
-                currentLogs.add("Available commands: run, build, test, git, tree, status, clear")
+                currentLogs.add("Available here: tree, status, clear, help")
+                currentLogs.add("run/build/test/git are not connected to a real shell or repository in this app yet.")
             }
             "run", "serve" -> {
-                currentLogs.add("[INFO] Starting local development server on http://localhost:3000...")
-                currentLogs.add("[SUCCESS] Live preview server running and watching files.")
+                currentLogs.add("Not executed: this terminal is not connected to a shell. Export the project to run it in a real development environment.")
             }
             "build" -> {
-                currentLogs.add("[BUILD] Compiling project assets and dependencies...")
-                currentLogs.add("[SUCCESS] Build finished with 0 errors in 420ms.")
+                currentLogs.add("Not executed: no project build toolchain is connected to this Android app.")
             }
             "test" -> {
-                currentLogs.add("[TEST] Running automated test suite...")
-                currentLogs.add("✓ UnitTests: 6 passed (0 failed)")
-                currentLogs.add("✓ Accessibility & HTML semantic checks: 100% compliant")
+                currentLogs.add("Not executed: tests require a project-specific runner, which is not connected yet.")
             }
             "git" -> {
-                val sub = parts.getOrNull(1)?.lowercase() ?: "status"
-                when (sub) {
-                    "status" -> currentLogs.add("On branch main. All files committed. Working tree clean.")
-                    "log" -> currentLogs.add("commit v1.0.0 (HEAD -> main) Initialized by Nuru Studio AI")
-                    else -> currentLogs.add("git: '$sub' execution simulated successfully.")
-                }
+                currentLogs.add("Not executed: this project workspace is not connected to a Git repository.")
+            }
+            "status" -> {
+                val project = selectedProject.value
+                if (project == null) currentLogs.add("No active project.")
+                else currentLogs.add("${project.name} · ${project.status} · ${project.files.size} fichier(s)")
             }
             "tree" -> {
                 val proj = selectedProject.value

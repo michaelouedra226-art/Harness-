@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.example.domain.model.Project
 import com.example.domain.model.ProjectFile
+import com.example.domain.model.ProjectPathValidator
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
@@ -21,7 +22,9 @@ object ProjectExporter {
 
             ZipOutputStream(FileOutputStream(zipFile)).use { zipOut ->
                 project.files.forEach { file ->
-                    val entry = ZipEntry(file.path)
+                    val safePath = ProjectPathValidator.normalizeRelativePath(file.path)
+                        ?: throw IllegalArgumentException("Chemin de fichier non autorisé dans le projet")
+                    val entry = ZipEntry(safePath)
                     zipOut.putNextEntry(entry)
                     zipOut.write(file.content.toByteArray(Charsets.UTF_8))
                     zipOut.closeEntry()

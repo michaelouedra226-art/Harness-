@@ -32,6 +32,7 @@ class MainActivity : ComponentActivity() {
                 val isGenerating by viewModel.isGenerating.collectAsState()
                 val generationStep by viewModel.generationStep.collectAsState()
                 val generationProgress by viewModel.generationProgress.collectAsState()
+                val generationError by viewModel.generationError.collectAsState()
                 val isPreviewFullScreen by viewModel.isPreviewFullScreen.collectAsState()
                 val selectedProject by viewModel.selectedProject.collectAsState()
 
@@ -110,7 +111,11 @@ class MainActivity : ComponentActivity() {
                                 isGenerating = isGenerating,
                                 generationStep = generationStep,
                                 generationProgress = generationProgress,
-                                onDismiss = { showCreateDialog = false },
+                                generationError = generationError,
+                                onDismiss = {
+                                    showCreateDialog = false
+                                    viewModel.clearGenerationError()
+                                },
                                 onConfirm = { name, desc, type ->
                                     viewModel.createProjectWithOrchestration(
                                         name = name,

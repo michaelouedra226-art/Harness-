@@ -26,6 +26,7 @@ fun CreateProjectDialog(
     isGenerating: Boolean,
     generationStep: String,
     generationProgress: Float,
+    generationError: String? = null,
     onDismiss: () -> Unit,
     onConfirm: (name: String, desc: String, type: ProjectType) -> Unit
 ) {
@@ -43,7 +44,7 @@ fun CreateProjectDialog(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isGenerating) "Orchestration Multi-Agents..." else "Nouveau Projet IA",
+                    text = if (isGenerating) "Génération IA en cours…" else "Nouveau Projet IA",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
                         color = PureWhite
@@ -93,7 +94,7 @@ fun CreateProjectDialog(
                             )
                         )
                         Text(
-                            text = "Les agents spécialisés collaborent et compilent les artefacts...",
+                            text = "Le modèle sélectionné génère les fichiers du projet…",
                             style = MaterialTheme.typography.bodySmall.copy(color = Silver)
                         )
                     }
@@ -113,6 +114,13 @@ fun CreateProjectDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    generationError?.let { error ->
+                        Text(
+                            text = "Échec de génération : $error",
+                            style = MaterialTheme.typography.bodySmall.copy(color = CoralError)
+                        )
+                    }
+
                     OutlinedTextField(
                         value = projectName,
                         onValueChange = { projectName = it },
@@ -199,7 +207,7 @@ fun CreateProjectDialog(
                 Button(
                     onClick = {
                         val name = projectName.ifBlank { "Nouveau Projet Nuru" }
-                        val desc = projectDesc.ifBlank { "Projet créé par l'orchestrateur multi-agents" }
+                        val desc = projectDesc.ifBlank { "Projet généré par le modèle sélectionné" }
                         onConfirm(name, desc, selectedType)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
@@ -212,7 +220,7 @@ fun CreateProjectDialog(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Générer avec les Agents", fontWeight = FontWeight.Bold)
+                    Text("Générer avec l’IA", fontWeight = FontWeight.Bold)
                 }
             }
         },
