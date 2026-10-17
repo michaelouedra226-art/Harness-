@@ -232,7 +232,7 @@ fun ChatScreen(
                         onValueChange = { inputText = it },
                         placeholder = {
                             Text(
-                                "Écrivez votre prompt ou instruction...",
+                                "Décrivez le résultat souhaité ; l’IA choisira les fichiers...",
                                 style = MaterialTheme.typography.bodyMedium.copy(color = MutedText)
                             )
                         },

@@ -231,19 +231,26 @@ class NuruRepository(
         val generatedFiles: List<ProjectFile> = run {
             val prompt = """
 Tu es le moteur de développement de Nuru Studio AI.
-Génère le code source de production complet pour le projet suivant :
+À partir du besoin ci-dessous, conçois et génère de manière autonome une application complète, cohérente et soignée. Déduis toi-même la structure, la stack et la liste des fichiers nécessaires : l’utilisateur n’a pas à nommer les fichiers ni à définir l’architecture.
+
+PROJET À RÉALISER :
 Nom : $name
 Type : ${type.displayName} (${type.stackSummary})
 Description : $description
 
-Règles de génération :
-- Génère chaque fichier complet prêt à l'emploi.
-- Utilise STRICTEMENT le format suivant pour chaque fichier :
+MÉTHODE :
+- Analyse le besoin, les utilisateurs et le type de produit, puis choisis les fichiers et la structure les plus adaptés à la stack demandée.
+- Génère tous les fichiers essentiels complets : code d’entrée, styles, composants, configuration et ressources nécessaires. Ne t’arrête pas au premier fichier et n’omets pas les fichiers requis pour que le projet soit cohérent.
+- Pour un site statique, choisis normalement index.html, styles.css et app.js. Pour un framework, un backend ou une application mobile, crée plutôt la structure et les manifestes propres à cette technologie.
+- Si l’utilisateur n’a pas précisé de plateforme ou de détail secondaire, fais un choix professionnel raisonnable au lieu de lui demander de choisir les noms de fichiers.
+- Réalise un résultat responsive, accessible, visuellement travaillé, avec des interactions réelles et des états d’erreur/chargement pertinents. N’ajoute pas de fonctions simulées ni de texte de remplissage présenté comme fonctionnel.
+- L’application ne lance pas encore les commandes de build ou de test des projets générés : ne prétends pas que le projet généré a été exécuté ou compilé.
+- Réponds uniquement avec les fichiers au format d’action ci-dessous ; aucun bloc de code ou explication ne doit remplacer un fichier nécessaire.
+
+FORMAT OBLIGATOIRE POUR CHAQUE FICHIER :
 FILE: chemin/vers/fichier.extension
 [code source complet ici]
 END_FILE
-
-Pour un site web, inclus obligatoirement index.html (avec Tailwind CDN), styles.css et app.js.
             """.trimIndent()
 
             val messages = listOf("user" to prompt)
@@ -361,6 +368,15 @@ CAPACITÉS RÉELLEMENT DISPONIBLES :
 - Tu ne peux pas supprimer des fichiers, modifier les clés/API/fournisseurs ou réglages, lancer des commandes, compiler, exécuter les tests ou utiliser Git. Ne dis jamais que tu l’as fait.
 - Si l’utilisateur demande une action non prise en charge, explique clairement la limite et propose la prochaine étape réelle.
 
+MÉTHODE AUTONOME DE RÉALISATION :
+- Comprends le résultat attendu à partir du langage naturel ; l’utilisateur n’a pas à demander séparément index.html, CSS, JavaScript, composants, configuration ou autres fichiers.
+- Pour une demande de création/modification, inspecte l’arborescence et les extraits fournis, conserve la stack existante et déduis toi-même la structure et les fichiers indispensables.
+- Pour un site web simple, crée normalement index.html, styles.css et app.js ; si le projet existant ou la demande requiert un framework, un backend ou une app mobile, adopte la structure adaptée au lieu de forcer ces trois fichiers.
+- Avant d’écrire, planifie silencieusement les fichiers nécessaires, puis crée-les tous dans une seule réponse d’actions lorsque possible. Ne réponds pas par un plan seul quand l’utilisateur demande une réalisation.
+- Fais des choix professionnels par défaut et pose une question uniquement si un choix manquant modifie matériellement le produit. Ne demande jamais à l’utilisateur de lister les fichiers ou l’architecture.
+- Pour un projet existant, modifie les vrais fichiers concernés et évite les doublons ou la réécriture inutile du projet entier. Si les contenus fournis sont tronqués, ne prétends pas avoir lu les parties manquantes.
+- Le résultat doit être cohérent, responsive si pertinent, accessible, visuellement soigné et fonctionnel dans les limites des capacités réellement connectées. Ne crée pas de fonctions fictives.
+
 FORMAT DES FICHIERS :
 Quand la demande implique de créer ou modifier du code, ne montre jamais le code dans le texte de discussion et n’utilise pas de bloc Markdown de code. Écris chaque fichier complet uniquement avec le protocole suivant :
 <<<ACTION:CREATE_FILE path="chemin/fichier.ext">>>
@@ -434,7 +450,7 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             val rawContent = response.content
 
             // Parse and execute actions with detailed diff tracking
-            val (actionsSummary, actionRecords, requestedTab) = executeAutonomousActionsWithDiff(rawContent)
+            val (actionsSummary, actionRecords, requestedTab) = executeAutonomousActionsWithDiff(rawContent, content)
             val filesWereSaved = actionRecords.isNotEmpty()
             destinationTab = requestedTab ?: if (filesWereSaved) 3 else null
             val visibleResponse = ChatContentSanitizer.sanitize(rawContent, filesWereSaved = filesWereSaved)
@@ -479,7 +495,10 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
         destinationTab
     }
 
-    private fun executeAutonomousActionsWithDiff(text: String): Triple<List<String>, List<AutonomousActionRecord>, Int?> {
+    private fun executeAutonomousActionsWithDiff(
+        text: String,
+        originalRequest: String = ""
+    ): Triple<List<String>, List<AutonomousActionRecord>, Int?> {
         val actionsReport = mutableListOf<String>()
         val actionRecords = mutableListOf<AutonomousActionRecord>()
         var requestedTab: Int? = null
@@ -511,12 +530,13 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
         if (safeFiles.isNotEmpty()) {
             var currentProj = _selectedProject.value
             if (currentProj == null) {
-                // Autonomously create a project if none is active
+                // Create a useful project shell from the user's request if none is active.
+                val inferredType = inferProjectType(originalRequest)
                 val newProj = Project(
                     id = UUID.randomUUID().toString().take(8),
-                    name = "Projet Autonome",
-                    description = "Projet créé automatiquement par l'IA",
-                    type = ProjectType.WEB_SITE,
+                    name = inferProjectName(originalRequest),
+                    description = originalRequest.take(240).ifBlank { "Projet créé depuis le chat" },
+                    type = inferredType,
                     status = ProjectStatus.READY,
                     createdAt = System.currentTimeMillis(),
                     updatedAt = System.currentTimeMillis()
@@ -617,6 +637,29 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
         if (actionRecords.isNotEmpty() && requestedTab == null) requestedTab = 3
 
         return Triple(actionsReport, actionRecords, requestedTab)
+    }
+
+    private fun inferProjectName(request: String): String {
+        val firstLine = request.lineSequence().firstOrNull().orEmpty()
+        val name = firstLine
+            .replace(Regex("""(?i)^(s'il te plaît[, ]*|please[, ]*|peux-tu\s+|can you\s+|crée(?:r|z)?\s+|cree(?:r|z)?\s+|create\s+|build\s+|génère(?:r)?\s+|genere(?:r)?\s+|fais(?:-moi)?\s+|make\s+)"""), "")
+            .replace(Regex("""(?i)^(?:(?:moi|me)\s+)?(?:un|une|a|an|the)\s+"""), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trimEnd('.', ',', '!', '?', ':')
+            .take(48)
+            .trim()
+        return name.ifBlank { "Projet du chat" }.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    }
+
+    private fun inferProjectType(request: String): ProjectType {
+        val normalized = request.lowercase()
+        return when {
+            listOf("flutter", "dart").any { normalized.contains(it) } -> ProjectType.MOBILE_FLUTTER
+            listOf("android", "kotlin", "jetpack compose").any { normalized.contains(it) } -> ProjectType.MOBILE_KOTLIN_COMPOSE
+            listOf("backend", "back-end", "api", "serveur", "server", "python", "script").any { normalized.contains(it) } -> ProjectType.SCRIPT_API
+            else -> ProjectType.WEB_SITE
+        }
     }
 
     private fun executeAutonomousActions(text: String): List<String> {
