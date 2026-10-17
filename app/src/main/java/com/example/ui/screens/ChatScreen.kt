@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -27,17 +28,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.model.ChatContentSanitizer
+import com.example.domain.model.ChatProgress
 import com.example.domain.model.AgentRole
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.MessageRole
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.NuruViewModel
+import kotlinx.coroutines.delay
 
 @Composable
 fun ChatScreen(
     viewModel: NuruViewModel
 ) {
     val messages by viewModel.chatMessages.collectAsState()
+    val chatProgress by viewModel.chatProgress.collectAsState()
     val agents by viewModel.agents.collectAsState()
     val selectedProject by viewModel.selectedProject.collectAsState()
     val activeFile by viewModel.activeFile.collectAsState()
@@ -124,6 +128,13 @@ fun ChatScreen(
             }
         }
 
+        if (chatProgress != null) {
+            ChatProgressBanner(
+                progress = chatProgress!!,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+        }
+
         // Messages List
         LazyColumn(
             modifier = Modifier
@@ -167,7 +178,7 @@ fun ChatScreen(
                         .clip(RoundedCornerShape(20.dp))
                         .background(Graphite)
                         .border(1.dp, GlassBorder, RoundedCornerShape(20.dp))
-                        .clickable {
+                        .clickable(enabled = chatProgress?.isComplete != false) {
                             viewModel.sendMessage(prompt, agent)
                         }
                         .padding(horizontal = 12.dp, vertical = 6.dp)
@@ -230,6 +241,7 @@ fun ChatScreen(
                     TextField(
                         value = inputText,
                         onValueChange = { inputText = it },
+                        readOnly = chatProgress?.isComplete == false,
                         placeholder = {
                             Text(
                                 "Décrivez le résultat souhaité ; l’IA choisira les fichiers...",
@@ -250,6 +262,7 @@ fun ChatScreen(
                     )
 
                     IconButton(
+                        enabled = chatProgress?.isComplete != false,
                         onClick = {
                             if (inputText.isNotBlank()) {
                                 val text = inputText
@@ -271,6 +284,69 @@ fun ChatScreen(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatProgressBanner(progress: ChatProgress, modifier: Modifier = Modifier) {
+    var currentTime by remember(progress.startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(progress.startedAtMillis, progress.isComplete) {
+        while (!progress.isComplete) {
+            currentTime = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+
+    val endTime = progress.completedAtMillis ?: currentTime
+    val elapsedSeconds = ((endTime - progress.startedAtMillis).coerceAtLeast(0L) / 1_000L).toInt()
+    val elapsedLabel = if (elapsedSeconds < 60) "${elapsedSeconds}s" else "${elapsedSeconds / 60} min ${elapsedSeconds % 60}s"
+    val firstResponseLabel = progress.firstChunkAtMillis?.let {
+        val seconds = ((it - progress.startedAtMillis).coerceAtLeast(0L) / 1_000L).toInt()
+        "Première réponse après ${seconds}s"
+    } ?: if (progress.isComplete) "Aucun fragment reçu" else "Attente de la première réponse · $elapsedLabel"
+    val providerLatencyLabel = progress.providerLatencyMillis?.let { "Temps API : ${it / 1_000}s" }
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = Graphite,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, GlassBorder)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (progress.isComplete) {
+                    Icon(
+                        imageVector = if (progress.isError) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = if (progress.isError) Color(0xFFFF6B6B) else NebulaBlue,
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = NebulaBlue)
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(progress.stage, style = MaterialTheme.typography.labelMedium.copy(color = PureWhite, fontWeight = FontWeight.SemiBold))
+                    val routeLabel = listOf(progress.providerName, progress.modelName).filter { it.isNotBlank() }.joinToString(" · ")
+                    Text(
+                        text = listOfNotNull(routeLabel.takeIf { it.isNotBlank() }, firstResponseLabel, providerLatencyLabel, "Durée : $elapsedLabel").joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall.copy(color = Silver)
+                    )
+                    if (progress.receivedCharacters > 0) {
+                        Text(
+                            "${progress.receivedCharacters} caractères reçus · contenu masqué dans le chat",
+                            style = MaterialTheme.typography.labelSmall.copy(color = MutedText)
+                        )
+                    }
+                }
+            }
+            if (!progress.isComplete) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    color = NebulaBlue,
+                    trackColor = Obsidian
+                )
             }
         }
     }
@@ -355,7 +431,7 @@ fun ChatMessageBubble(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NuruViolet)
                         Text(
-                            "L’IA analyse le contexte et prépare sa réponse. Le code apparaîtra dans les fichiers, pas ici.",
+                            "Suivez l’étape et le temps dans le panneau ci-dessus. Le code reste masqué dans le chat.",
                             style = MaterialTheme.typography.bodySmall.copy(color = Silver)
                         )
                     }

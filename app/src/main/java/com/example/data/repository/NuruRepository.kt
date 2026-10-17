@@ -53,6 +53,9 @@ class NuruRepository(
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(loadInitialChatMessages())
     val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
 
+    private val _chatProgress = MutableStateFlow<ChatProgress?>(null)
+    val chatProgress: StateFlow<ChatProgress?> = _chatProgress.asStateFlow()
+
     // --- Provider Actions ---
 
     suspend fun testProvider(providerId: String): AIProviderClient.TestResult {
@@ -311,6 +314,11 @@ END_FILE
         targetAgent: AgentRole?,
         runtimeContext: String
     ): Int? = withContext(Dispatchers.IO) {
+        val requestStartedAt = System.currentTimeMillis()
+        _chatProgress.value = ChatProgress(
+            stage = "Préparation de la demande et vérification du modèle",
+            startedAtMillis = requestStartedAt
+        )
         var destinationTab: Int? = null
         val userMsg = ChatMessage(
             id = UUID.randomUUID().toString(),
@@ -345,12 +353,19 @@ END_FILE
             val updatedWithError = updatedWithUser + errorMsg
             _chatMessages.value = updatedWithError
             storage.saveChatMessages(updatedWithError)
+            _chatProgress.value = null
             return@withContext null
         }
 
         val activeProvider = route.first
         val selectedModel = route.second
         val modelId = selectedModel.apiModelId
+        _chatProgress.value = ChatProgress(
+            stage = "Vérification de la connexion et préparation du contexte",
+            startedAtMillis = requestStartedAt,
+            providerName = activeProvider.name,
+            modelName = selectedModel.name
+        )
 
         val systemPrompt = """
 Tu es l’assistant de développement intégré à Nuru Studio (profil ${respondingAgent.title}, spécialité : ${respondingAgent.specialty}).
@@ -402,6 +417,7 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             val updatedWithOffline = updatedWithUser + offlineMsg
             _chatMessages.value = updatedWithOffline
             storage.saveChatMessages(updatedWithOffline)
+            _chatProgress.value = null
             return@withContext null
         }
 
@@ -432,6 +448,13 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             roleStr to safeContent
         }
 
+        _chatProgress.value = ChatProgress(
+            stage = "Requête envoyée · attente de la première réponse du fournisseur",
+            startedAtMillis = requestStartedAt,
+            providerName = activeProvider.name,
+            modelName = selectedModel.name
+        )
+        var lastProgressUpdateAt = 0L
         val result = apiClient.sendChatCompletionStream(
             provider = activeProvider,
             modelId = modelId,
@@ -439,6 +462,19 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             messages = conversationHistory,
             temperature = 0.5f,
             onChunk = { accumulated, _ ->
+                val now = System.currentTimeMillis()
+                val currentProgress = _chatProgress.value
+                if (currentProgress?.startedAtMillis == requestStartedAt &&
+                    (currentProgress.firstChunkAtMillis == null || now - lastProgressUpdateAt >= 300 ||
+                        accumulated.length - currentProgress.receivedCharacters >= 120)
+                ) {
+                    _chatProgress.value = currentProgress.copy(
+                        stage = "Réponse reçue · génération en cours",
+                        receivedCharacters = accumulated.length,
+                        firstChunkAtMillis = currentProgress.firstChunkAtMillis ?: now
+                    )
+                    lastProgressUpdateAt = now
+                }
                 _chatMessages.value = _chatMessages.value.map {
                     if (it.id == assistantMsgId) it.copy(content = accumulated) else it
                 }
@@ -448,6 +484,10 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
         if (result.isSuccess) {
             val response = result.getOrThrow()
             val rawContent = response.content
+            _chatProgress.value = _chatProgress.value?.copy(
+                stage = "Réponse complète · traitement des actions et enregistrement",
+                receivedCharacters = rawContent.length
+            )
 
             // Parse and execute actions with detailed diff tracking
             val (actionsSummary, actionRecords, requestedTab) = executeAutonomousActionsWithDiff(rawContent, content)
@@ -476,6 +516,13 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             }
             _chatMessages.value = finalMessages
             storage.saveChatMessages(finalMessages)
+            _chatProgress.value = _chatProgress.value?.copy(
+                stage = if (filesWereSaved) "Fichiers enregistrés · éditeur prêt" else "Réponse terminée",
+                receivedCharacters = rawContent.length,
+                providerLatencyMillis = response.latencyMs,
+                completedAtMillis = System.currentTimeMillis(),
+                isComplete = true
+            )
         } else {
             val err = result.exceptionOrNull()?.localizedMessage ?: "Erreur réseau inconnue"
             val errorMsg = ChatMessage(
@@ -491,6 +538,12 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             }
             _chatMessages.value = finalMessages
             storage.saveChatMessages(finalMessages)
+            _chatProgress.value = _chatProgress.value?.copy(
+                stage = "Échec de la réponse · consultez le message d’erreur",
+                completedAtMillis = System.currentTimeMillis(),
+                isComplete = true,
+                isError = true
+            )
         }
         destinationTab
     }
@@ -546,7 +599,10 @@ Si le besoin est ambigu sur un point qui change fortement le produit, pose une q
             }
 
             val updatedFiles = currentProj.files.toMutableList()
-            safeFiles.forEach { (path, content) ->
+            safeFiles.forEachIndexed { fileIndex, (path, content) ->
+                _chatProgress.value = _chatProgress.value?.copy(
+                    stage = "Enregistrement du fichier ${fileIndex + 1}/${safeFiles.size} : $path"
+                )
                 val name = path.substringAfterLast("/")
                 val ext = name.substringAfterLast(".", "")
                 val lang = when (ext.lowercase()) {

@@ -60,6 +60,7 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     val selectedProject = repository.selectedProject
     val activeFile = repository.activeFile
     val chatMessages = repository.chatMessages
+    val chatProgress = repository.chatProgress
 
     // AI project generation state
     private val _isGenerating = MutableStateFlow(false)
