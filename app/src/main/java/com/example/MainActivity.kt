@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.domain.model.RouterSlotType
 import com.example.ui.components.CreateProjectDialog
@@ -39,6 +42,15 @@ class MainActivity : ComponentActivity() {
                 val routerConfig by viewModel.routerConfig.collectAsState()
                 val isPreviewFullScreen by viewModel.isPreviewFullScreen.collectAsState()
                 val selectedProject by viewModel.selectedProject.collectAsState()
+                SideEffect {
+                    val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+                    if (isPreviewFullScreen) {
+                        insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        insetsController.hide(WindowInsetsCompat.Type.systemBars())
+                    } else {
+                        insetsController.show(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
                 val activeModel = routerConfig.slots[RouterSlotType.POWERFUL]?.assignedModelId
                     ?.let { selectedId -> models.firstOrNull { it.id == selectedId } }
                 val activeModelName = activeModel?.name ?: "Aucun modèle"

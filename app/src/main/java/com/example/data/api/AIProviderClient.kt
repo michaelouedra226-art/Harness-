@@ -54,6 +54,38 @@ class AIProviderClient {
             val code = response.code
             if (code in 200..299) {
                 val models = parseModelsList(body).distinct()
+                if (provider.type == ProviderType.HERMES_AGENT) {
+                    val capabilitiesRequest = requestBuilder(provider, appendPath(provider.baseUrl.trim().trimEnd('/'), "capabilities")).get().build()
+                    val capabilitiesResponse = client.newCall(capabilitiesRequest).execute()
+                    val capabilitiesBody = capabilitiesResponse.use { it.body?.string().orEmpty() }
+                    if (!capabilitiesResponse.isSuccessful) {
+                        return@withContext TestResult(
+                            TestStatus.ERROR,
+                            "L’endpoint répond, mais la vérification Hermes /capabilities a échoué : ${formatHttpError(capabilitiesResponse.code, capabilitiesResponse.message, capabilitiesBody)}",
+                            System.currentTimeMillis() - startTime,
+                            models
+                        )
+                    }
+                    val capabilities = JSONObject(capabilitiesBody)
+                    val isHermes = capabilities.optString("object") == "hermes.api_server.capabilities"
+                    val features = capabilities.optJSONObject("features")
+                    val supportsChat = features?.optBoolean("chat_completions", false) == true
+                    if (!isHermes || !supportsChat) {
+                        return@withContext TestResult(
+                            TestStatus.ERROR,
+                            "Ce serveur n’annonce pas l’API Hermes Agent attendue. Vérifiez l’URL /v1 et l’activation de l’API Server Hermes.",
+                            System.currentTimeMillis() - startTime,
+                            models
+                        )
+                    }
+                    return@withContext TestResult(
+                        if (models.isEmpty()) TestStatus.WARNING else TestStatus.SUCCESS,
+                        if (models.isEmpty()) "Serveur Hermes confirmé, mais aucun modèle n’est exposé sur /models. Vérifiez le modèle côté Hermes."
+                        else "Serveur Hermes Agent confirmé — ${models.size} modèles exposés. Ses outils s’exécutent côté serveur.",
+                        System.currentTimeMillis() - startTime,
+                        models
+                    )
+                }
                 if (models.isEmpty()) {
                     TestResult(
                         TestStatus.WARNING,
@@ -131,7 +163,8 @@ class AIProviderClient {
         systemPrompt: String,
         messages: List<Pair<String, String>>,
         temperature: Float = 0.5f,
-        onChunk: (accumulated: String, delta: String) -> Unit
+        onChunk: (accumulated: String, delta: String) -> Unit,
+        onAgentProgress: (String) -> Unit = {}
     ): Result<ChatResponse> = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {
@@ -147,16 +180,29 @@ class AIProviderClient {
             }
 
             val accumulated = StringBuilder()
+            var sseEventName = ""
             val body = response.body ?: return@withContext Result.failure(Exception("Réponse vide du fournisseur."))
             body.source().use { source ->
                 while (!source.exhausted()) {
                     val line = source.readUtf8Line() ?: break
+                    if (line.startsWith("event:")) {
+                        sseEventName = line.removePrefix("event:").trim()
+                        continue
+                    }
+                    if (line.isBlank()) {
+                        sseEventName = ""
+                        continue
+                    }
                     val payload = when {
                         line.startsWith("data:") -> line.removePrefix("data:").trim()
                         provider.type == ProviderType.OLLAMA && line.isNotBlank() -> line.trim()
                         else -> continue
                     }
                     if (payload.isBlank() || payload == "[DONE]") continue
+                    if (sseEventName == "hermes.tool.progress") {
+                        onAgentProgress(formatHermesToolProgress(payload))
+                        continue
+                    }
                     val delta = extractStreamDelta(provider.type, payload)
                     if (delta.isNotEmpty()) {
                         accumulated.append(delta)
@@ -187,8 +233,9 @@ class AIProviderClient {
             return "La clé API est requise pour ce fournisseur."
         }
         val url = provider.baseUrl.toHttpUrlOrNull() ?: return "L’URL de base doit être une URL HTTP/HTTPS valide."
-        if (url.isHttps.not() && (provider.type != ProviderType.OLLAMA || !isLocalOllamaHost(url.host))) {
-            return "HTTPS est requis pour les fournisseurs distants. HTTP est autorisé uniquement pour Ollama sur un hôte local/privé."
+        val localRuntime = provider.type in setOf(ProviderType.OLLAMA, ProviderType.HERMES_AGENT) && isLocalOllamaHost(url.host)
+        if (url.isHttps.not() && !localRuntime) {
+            return "HTTPS est requis pour les fournisseurs distants. HTTP est autorisé uniquement pour un runtime local/privé Ollama ou Hermes Agent."
         }
         return null
     }
@@ -197,6 +244,15 @@ class AIProviderClient {
         host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "10.0.2.2" ||
             host.endsWith(".local") || host.startsWith("10.") || host.startsWith("192.168.") ||
             Regex("^172\\.(1[6-9]|2[0-9]|3[01])\\.").containsMatchIn(host)
+
+    private fun formatHermesToolProgress(payload: String): String {
+        val root = runCatching { JSONObject(payload) }.getOrNull() ?: return "Hermes exécute un outil"
+        val rawTool = sequenceOf("tool_name", "tool", "name").mapNotNull { key ->
+            root.opt(key)?.let { value -> if (value is JSONObject) value.optString("name") else value.toString() }
+        }.firstOrNull { it.isNotBlank() }
+        val safeTool = rawTool?.replace(Regex("[^A-Za-z0-9_.-]"), "")?.take(48)
+        return if (safeTool.isNullOrBlank()) "Hermes exécute un outil" else "Hermes · outil : $safeTool"
+    }
 
     private fun requestBuilder(provider: AIProvider, url: String): Request.Builder {
         val builder = Request.Builder().url(url)

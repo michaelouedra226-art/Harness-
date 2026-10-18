@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.webkit.WebView
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebChromeClient
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
@@ -33,8 +37,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.example.domain.model.AgentRole
 import com.example.domain.model.Project
 import com.example.domain.model.ProjectFile
+import com.example.domain.model.ProjectPathValidator
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.NuruViewModel
+import java.io.ByteArrayInputStream
 
 @Composable
 fun CodeEditorScreen(
@@ -591,8 +597,28 @@ fun LivePreviewTab(
     onToggleFullScreen: () -> Unit = {},
     onExitFullScreen: () -> Unit = {}
 ) {
-    val htmlContent = remember(project.files) {
-        buildMergedHtmlPreview(project)
+    val htmlEntry = remember(project.id, project.files) {
+        project.files.firstOrNull { it.path.equals("index.html", ignoreCase = true) }
+            ?: project.files.firstOrNull { it.extension.equals("html", ignoreCase = true) || it.extension.equals("htm", ignoreCase = true) }
+    }
+    val htmlContent = remember(project.id, project.files) {
+        htmlEntry?.content ?: buildMergedHtmlPreview(project)
+    }
+    val entryPath = htmlEntry?.path ?: "__nuru_preview__.html"
+    val previewFiles = remember(project.id, project.files, htmlContent, entryPath) {
+        project.files.mapNotNull { file ->
+            ProjectPathValidator.normalizeRelativePath(file.path)?.let { it to file }
+        }.toMap().toMutableMap().apply {
+            if (entryPath !in this) {
+                put(entryPath, ProjectFile(entryPath, entryPath.substringAfterLast('/'), "html", htmlContent, "html"))
+            }
+        }.toMap()
+    }
+    val pageUrl = remember(entryPath) {
+        "https://$PREVIEW_HOST/" + entryPath.split('/').joinToString("/") { Uri.encode(it) }
+    }
+    val pageRevision = remember(project.id, project.files, entryPath) {
+        "${project.id}:${project.files.hashCode()}:$entryPath"
     }
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
@@ -703,13 +729,22 @@ fun LivePreviewTab(
                                 settings.domStorageEnabled = true
                                 settings.loadWithOverviewMode = true
                                 settings.useWideViewPort = true
-                                webViewClient = WebViewClient()
-                                loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
+                                settings.allowFileAccess = false
+                                settings.allowContentAccess = false
+                                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                webChromeClient = WebChromeClient()
+                                webViewClient = LocalProjectPreviewClient(previewFiles, entryPath)
+                                tag = pageRevision
+                                loadUrl(pageUrl)
                                 webViewRef = this
                             }
                         },
                         update = { webView ->
-                            webView.loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
+                            if (webView.tag != pageRevision) {
+                                webView.tag = pageRevision
+                                webView.webViewClient = LocalProjectPreviewClient(previewFiles, entryPath)
+                                webView.loadUrl(pageUrl)
+                            }
                             webViewRef = webView
                         }
                     )
@@ -826,6 +861,64 @@ fun NewFileDialog(
     )
 }
 
+private const val PREVIEW_HOST = "preview.nuru.local"
+
+private class LocalProjectPreviewClient(
+    private val filesByPath: Map<String, ProjectFile>,
+    private val entryPath: String
+) : WebViewClient() {
+    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
+        val uri = request.url
+        if (!uri.host.equals(PREVIEW_HOST, ignoreCase = true)) {
+            return super.shouldInterceptRequest(view, request)
+        }
+
+        val requestedPath = uri.pathSegments.joinToString("/").ifBlank { entryPath }
+        val safePath = ProjectPathValidator.normalizeRelativePath(requestedPath)
+        val file = safePath?.let(filesByPath::get)
+            ?: if (requestedPath.substringAfterLast('/').contains('.')) null else filesByPath[entryPath]
+        if (file == null) {
+            return WebResourceResponse(
+                "text/plain",
+                "UTF-8",
+                404,
+                "Not Found",
+                mapOf("Cache-Control" to "no-store"),
+                ByteArrayInputStream("Ressource absente du projet".toByteArray(Charsets.UTF_8))
+            )
+        }
+
+        val mimeType = when (file.extension.lowercase()) {
+            "html", "htm" -> "text/html"
+            "css" -> "text/css"
+            "js", "mjs" -> "application/javascript"
+            "json" -> "application/json"
+            "webmanifest" -> "application/manifest+json"
+            "svg" -> "image/svg+xml"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "ico" -> "image/x-icon"
+            "woff" -> "font/woff"
+            "woff2" -> "font/woff2"
+            "ttf" -> "font/ttf"
+            "xml" -> "application/xml"
+            "wasm" -> "application/wasm"
+            "txt", "md" -> "text/plain"
+            else -> "application/octet-stream"
+        }
+        return WebResourceResponse(
+            mimeType,
+            "UTF-8",
+            ByteArrayInputStream(file.content.toByteArray(Charsets.UTF_8))
+        )
+    }
+
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean =
+        request.isForMainFrame && !request.url.host.equals(PREVIEW_HOST, ignoreCase = true)
+}
+
 fun buildMergedHtmlPreview(project: Project): String {
     val htmlFile = project.files.find { it.extension == "html" }
         ?: return """
@@ -834,7 +927,7 @@ fun buildMergedHtmlPreview(project: Project): String {
                 <body style="background:#0A0A12;color:white;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;">
                     <div style="text-align:center;padding:24px;">
                         <h2 style="font-size:24px;margin-bottom:8px;color:#6C4CF1;">${project.name}</h2>
-                        <p style="color:#A0A0B8;max-width:400px;font-size:14px;">Créez un fichier <code>index.html</code> ou demandez à l'IA autonome de concevoir votre application pour activer l'aperçu dynamique.</p>
+                        <p style="color:#A0A0B8;max-width:400px;font-size:14px;">Aucune page HTML n'a été trouvée dans ce projet. Ajoutez une page Web pour afficher son vrai rendu ici. Les projets Android/Flutter nécessitent une compilation distincte pour être lancés.</p>
                     </div>
                 </body>
             </html>

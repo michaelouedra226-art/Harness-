@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -882,6 +883,9 @@ fun AddProviderDialog(
                                 onClick = {
                                     selectedType = type
                                     baseUrl = type.defaultBaseUrl
+                                    if (name.isBlank() || name == ProviderType.OPENAI_COMPATIBLE.displayName) {
+                                        name = type.displayName
+                                    }
                                     typeMenuExpanded = false
                                 }
                             )
@@ -916,7 +920,12 @@ fun AddProviderDialog(
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
-                    label = { Text("Clé API (facultative pour local/personnalisé)") },
+                    label = {
+                        Text(
+                            if (selectedType == ProviderType.HERMES_AGENT) "Clé API Server Hermes (Bearer)"
+                            else "Clé API (facultative pour local/personnalisé)"
+                        )
+                    },
                     visualTransformation = PasswordVisualTransformation(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = PureWhite,
@@ -925,10 +934,26 @@ fun AddProviderDialog(
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
-                Text(
-                    "Après l’enregistrement, l’application interroge cette API et affiche les modèles qu’elle renvoie.",
-                    style = MaterialTheme.typography.bodySmall.copy(color = Silver)
-                )
+                if (selectedType == ProviderType.HERMES_AGENT) {
+                    Surface(color = Graphite, shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, GlassBorder)) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Connexion à un vrai Hermes Agent", color = PureWhite, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                            Text(
+                                "Cette app se connecte au serveur API Hermes déjà lancé. Sur le serveur, activez l’API Server et créez un token. L’URL doit se terminer par /v1 ; utilisez HTTPS ou un VPN privé hors du téléphone. Ne publiez jamais le port Hermes directement sur Internet.",
+                                style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                            )
+                            Text(
+                                "Configurez DeepSeek dans le sélecteur de modèle Hermes côté serveur. La clé saisie ici est le token Hermes, pas la clé DeepSeek. Hermes peut lancer des outils sur son propre serveur ; ce workspace est distinct des fichiers locaux du téléphone. Le test vérifie /models et /capabilities.",
+                                style = MaterialTheme.typography.bodySmall.copy(color = NebulaBlue)
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        "Après l’enregistrement, l’application interroge cette API et affiche les modèles qu’elle renvoie.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                    )
+                }
             }
         },
         confirmButton = {

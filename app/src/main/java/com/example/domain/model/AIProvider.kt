@@ -5,6 +5,7 @@ enum class ProviderType(val displayName: String, val defaultBaseUrl: String) {
     GEMINI("Google Gemini", "https://generativelanguage.googleapis.com/v1beta"),
     ANTHROPIC("Anthropic Claude", "https://api.anthropic.com/v1"),
     DEEPSEEK("DeepSeek", "https://api.deepseek.com/v1"),
+    HERMES_AGENT("Hermes Agent · serveur", ""),
     MISTRAL("Mistral AI", "https://api.mistral.ai/v1"),
     OPENROUTER("OpenRouter", "https://openrouter.ai/api/v1"),
     OLLAMA("Ollama Local", "http://127.0.0.1:11434/api"),
