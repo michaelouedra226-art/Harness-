@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.model.ChatContentSanitizer
 import com.example.domain.model.ChatProgress
+import com.example.domain.model.HermesApprovalRequest
 import com.example.domain.model.AgentRole
 import com.example.domain.model.ChatMessage
 import com.example.domain.model.MessageRole
@@ -131,7 +132,12 @@ fun ChatScreen(
         if (chatProgress != null) {
             ChatProgressBanner(
                 progress = chatProgress!!,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                onResolveApproval = { request, choice ->
+                    viewModel.respondToHermesApproval(request, choice) { error ->
+                        if (error != null) Toast.makeText(context, "Approbation non transmise : $error", Toast.LENGTH_LONG).show()
+                    }
+                }
             )
         }
 
@@ -290,7 +296,11 @@ fun ChatScreen(
 }
 
 @Composable
-private fun ChatProgressBanner(progress: ChatProgress, modifier: Modifier = Modifier) {
+private fun ChatProgressBanner(
+    progress: ChatProgress,
+    modifier: Modifier = Modifier,
+    onResolveApproval: (HermesApprovalRequest, String) -> Unit
+) {
     var currentTime by remember(progress.startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(progress.startedAtMillis, progress.isComplete) {
         while (!progress.isComplete) {
@@ -333,11 +343,44 @@ private fun ChatProgressBanner(progress: ChatProgress, modifier: Modifier = Modi
                         text = listOfNotNull(routeLabel.takeIf { it.isNotBlank() }, firstResponseLabel, providerLatencyLabel, "Durée : $elapsedLabel").joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall.copy(color = Silver)
                     )
-                    if (progress.receivedCharacters > 0) {
+            if (progress.receivedCharacters > 0) {
                         Text(
                             "${progress.receivedCharacters} caractères reçus · contenu masqué dans le chat",
                             style = MaterialTheme.typography.labelSmall.copy(color = MutedText)
                         )
+                    }
+                }
+            }
+            progress.approvalRequest?.let { approval ->
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Hermes demande une autorisation${approval.toolName.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}",
+                        style = MaterialTheme.typography.labelMedium.copy(color = Color(0xFFFFC857), fontWeight = FontWeight.Bold)
+                    )
+                    if (approval.commandPreview.isNotBlank()) {
+                        Text(
+                            text = approval.commandPreview.take(700),
+                            style = MaterialTheme.typography.bodySmall.copy(color = Silver),
+                            maxLines = 8
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if ("once" in approval.availableChoices) {
+                            Button(
+                                onClick = { onResolveApproval(approval, "once") },
+                                colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) { Text("Autoriser une fois", fontSize = 12.sp) }
+                        }
+                        if ("deny" in approval.availableChoices) {
+                            OutlinedButton(
+                                onClick = { onResolveApproval(approval, "deny") },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) { Text("Refuser", fontSize = 12.sp) }
+                        }
                     }
                 }
             }

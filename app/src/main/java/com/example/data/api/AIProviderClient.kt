@@ -38,6 +38,194 @@ class AIProviderClient {
         val rawResponse: String = ""
     )
 
+    data class HermesRunEvent(
+        val event: String,
+        val runId: String = "",
+        val toolName: String = "",
+        val preview: String = "",
+        val isError: Boolean = false,
+        val output: String = "",
+        val requestId: String = "",
+        val choices: List<String> = emptyList(),
+        val command: String = ""
+    )
+
+    private val hermesRunsClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    /** Runs a real Hermes Agent turn and consumes its structured tool/approval event stream. */
+    suspend fun runHermesAgent(
+        provider: AIProvider,
+        modelId: String,
+        instructions: String,
+        input: String,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
+        onChunk: (accumulated: String, delta: String) -> Unit = { _, _ -> },
+        onEvent: (HermesRunEvent) -> Unit = {}
+    ): Result<ChatResponse> = withContext(Dispatchers.IO) {
+        val startedAt = System.currentTimeMillis()
+        try {
+            if (provider.type != ProviderType.HERMES_AGENT) {
+                return@withContext Result.failure(IllegalArgumentException("Cette API Runs est réservée à Hermes Agent."))
+            }
+            val validationError = validateProvider(provider)
+            if (validationError != null) return@withContext Result.failure(IllegalArgumentException(validationError))
+            if (modelId.isBlank()) return@withContext Result.failure(IllegalArgumentException("Aucun modèle Hermes n’est sélectionné."))
+            if (input.isBlank()) return@withContext Result.failure(IllegalArgumentException("La demande est vide."))
+
+            val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+            val requestBody = JSONObject().apply {
+                put("input", input)
+                put("instructions", instructions)
+                put("model", modelId)
+                if (conversationHistory.isNotEmpty()) {
+                    put("conversation_history", JSONArray().apply {
+                        conversationHistory.forEach { (role, content) ->
+                            put(JSONObject().put("role", role).put("content", content))
+                        }
+                    })
+                }
+            }
+            val base = provider.baseUrl.trim().trimEnd('/')
+            val submitRequest = requestBuilder(provider, appendPath(base, "runs"))
+                .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
+                .post(requestBody.toString().toRequestBody(jsonMediaType))
+                .build()
+            val submitResponse = hermesRunsClient.newCall(submitRequest).execute()
+            val submitBody = submitResponse.use { it.body?.string().orEmpty() }
+            if (!submitResponse.isSuccessful) {
+                return@withContext Result.failure(Exception(formatHttpError(submitResponse.code, submitResponse.message, submitBody)))
+            }
+            val runId = JSONObject(submitBody).optString("run_id").takeIf { it.isNotBlank() }
+                ?: return@withContext Result.failure(Exception("Hermes n’a pas renvoyé l’identifiant du run."))
+            onEvent(HermesRunEvent(event = "run.started", runId = runId))
+
+            val eventsUrl = appendPath(base, "runs/$runId/events")
+            val eventsRequest = requestBuilder(provider, eventsUrl).get().build()
+            val eventsResponse = hermesRunsClient.newCall(eventsRequest).execute()
+            if (!eventsResponse.isSuccessful) {
+                val body = eventsResponse.use { it.body?.string().orEmpty() }
+                return@withContext Result.failure(Exception(formatHttpError(eventsResponse.code, eventsResponse.message, body)))
+            }
+
+            val accumulated = StringBuilder()
+            var finalOutput = ""
+            var errorMessage = ""
+            var inputTokens = 0
+            var outputTokens = 0
+            val eventBody = eventsResponse.body ?: return@withContext Result.failure(Exception("Flux d’événements Hermes vide."))
+            eventBody.source().use { source ->
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    if (line.isBlank() || line.startsWith(":")) continue
+                    if (!line.startsWith("data:")) continue
+                    val payload = line.removePrefix("data:").trim()
+                    if (payload.isBlank()) continue
+                    val root = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                    val eventName = root.optString("event")
+                    val eventRunId = root.optString("run_id", runId)
+                    val toolName = sequenceOf("tool", "tool_name", "name")
+                        .mapNotNull { key -> root.opt(key)?.let { value ->
+                            if (value is JSONObject) value.optString("name") else value.toString()
+                        } }
+                        .firstOrNull { it.isNotBlank() }.orEmpty()
+                    when (eventName) {
+                        "message.delta" -> {
+                            val delta = root.optString("delta")
+                            if (delta.isNotEmpty()) {
+                                accumulated.append(delta)
+                                onChunk(accumulated.toString(), delta)
+                            }
+                        }
+                        "tool.started", "tool.completed", "subagent.start", "subagent.complete" -> {
+                            onEvent(HermesRunEvent(
+                                event = eventName,
+                                runId = eventRunId,
+                                toolName = toolName,
+                                preview = root.optString("preview"),
+                                isError = root.optBoolean("error", root.optBoolean("is_error", false))
+                            ))
+                        }
+                        "approval.request" -> {
+                            val choicesArray = root.optJSONArray("choices")
+                            val choices = if (choicesArray == null) emptyList() else (0 until choicesArray.length())
+                                .mapNotNull { choicesArray.optString(it).takeIf(String::isNotBlank) }
+                            onEvent(HermesRunEvent(
+                                event = eventName,
+                                runId = eventRunId,
+                                toolName = toolName,
+                                preview = root.optString("preview"),
+                                requestId = root.optString("request_id"),
+                                choices = choices,
+                                command = root.optString("command")
+                            ))
+                        }
+                        "run.completed" -> {
+                            finalOutput = root.optString("output")
+                            val usage = root.optJSONObject("usage")
+                            inputTokens = usage?.optInt("input_tokens", 0) ?: 0
+                            outputTokens = usage?.optInt("output_tokens", 0) ?: 0
+                            onEvent(HermesRunEvent(event = eventName, runId = eventRunId, output = finalOutput))
+                        }
+                        "run.failed", "run.cancelled", "run.interrupted" -> {
+                            errorMessage = root.optString("error").ifBlank { "Le run Hermes s’est terminé avec le statut ${eventName.removePrefix("run.")}." }
+                            onEvent(HermesRunEvent(event = eventName, runId = eventRunId, preview = errorMessage, isError = true))
+                        }
+                        "approval.responded" -> onEvent(HermesRunEvent(event = eventName, runId = eventRunId))
+                    }
+                    if (eventName in setOf("run.completed", "run.failed", "run.cancelled", "run.interrupted")) break
+                }
+            }
+
+            if (errorMessage.isNotBlank()) return@withContext Result.failure(Exception(errorMessage))
+            val content = finalOutput.ifBlank { accumulated.toString() }
+            if (content.isBlank()) return@withContext Result.failure(Exception("Hermes a terminé sans renvoyer de réponse."))
+            if (accumulated.toString() != content) onChunk(content, content)
+            Result.success(ChatResponse(
+                content = content,
+                tokensIn = inputTokens,
+                tokensOut = outputTokens,
+                latencyMs = System.currentTimeMillis() - startedAt,
+                rawResponse = content
+            ))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun resolveHermesRunApproval(
+        provider: AIProvider,
+        runId: String,
+        requestId: String,
+        choice: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            if (choice !in setOf("once", "deny")) {
+                return@withContext Result.failure(IllegalArgumentException("Choix d’approbation non autorisé."))
+            }
+            val body = JSONObject().put("choice", choice).apply {
+                if (requestId.isNotBlank()) put("request_id", requestId)
+            }
+            val url = appendPath(provider.baseUrl.trim().trimEnd('/'), "runs/$runId/approval")
+            val request = requestBuilder(provider, url)
+                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            val response = client.newCall(request).execute()
+            val responseBody = response.use { it.body?.string().orEmpty() }
+            if (response.isSuccessful) Result.success(Unit)
+            else Result.failure(Exception(formatHttpError(response.code, response.message, responseBody)))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun testConnection(provider: AIProvider): TestResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {

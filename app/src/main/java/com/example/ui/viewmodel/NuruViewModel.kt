@@ -75,13 +75,22 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
     private val _generationError = MutableStateFlow<String?>(null)
     val generationError: StateFlow<String?> = _generationError.asStateFlow()
 
+    private val _generationApproval = MutableStateFlow<HermesApprovalRequest?>(null)
+    val generationApproval: StateFlow<HermesApprovalRequest?> = _generationApproval.asStateFlow()
+
     // Preview Full Screen Mode
     private val _isPreviewFullScreen = MutableStateFlow(false)
     val isPreviewFullScreen: StateFlow<Boolean> = _isPreviewFullScreen.asStateFlow()
 
     // Terminal History
-    private val _terminalLogs = MutableStateFlow(listOf("Terminal de projet — aperçu local uniquement.", "Type 'help' for available commands."))
+    private val _terminalLogs = MutableStateFlow(listOf("Terminal Hermes distant prêt — les commandes s’exécutent dans le workspace Hermes, pas dans le système Android local.", "Type 'help' for available commands."))
     val terminalLogs: StateFlow<List<String>> = _terminalLogs.asStateFlow()
+
+    private val _isTerminalRunning = MutableStateFlow(false)
+    val isTerminalRunning: StateFlow<Boolean> = _isTerminalRunning.asStateFlow()
+
+    private val _terminalApproval = MutableStateFlow<HermesApprovalRequest?>(null)
+    val terminalApproval: StateFlow<HermesApprovalRequest?> = _terminalApproval.asStateFlow()
 
     fun switchTab(tab: Int) {
         _currentTab.value = tab
@@ -158,6 +167,26 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
         repository.selectModelForAllSlots(model)
     }
 
+    fun activateHermesForEntireApp(modelId: String): Boolean =
+        repository.activateHermesModelForEntireApp(modelId)
+
+    fun respondToHermesApproval(
+        request: HermesApprovalRequest,
+        choice: String,
+        onComplete: (String?) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val result = repository.respondToHermesApproval(request, choice)
+            if (result.isSuccess && _generationApproval.value?.runId == request.runId) {
+                _generationApproval.value = null
+            }
+            if (result.isSuccess && _terminalApproval.value?.runId == request.runId) {
+                _terminalApproval.value = null
+            }
+            onComplete(result.exceptionOrNull()?.localizedMessage)
+        }
+    }
+
     fun testModel(model: AIModel, prompt: String, onComplete: (String) -> Unit) {
         viewModelScope.launch {
             val result = repository.testModel(model, prompt)
@@ -213,6 +242,7 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isGenerating.value = true
             _generationError.value = null
+            _generationApproval.value = null
             _generationProgress.value = 0.05f
             _generationStep.value = "Initialisation de la tâche..."
 
@@ -224,7 +254,8 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
                     onStepUpdate = { step, progress ->
                         _generationStep.value = step
                         _generationProgress.value = progress
-                    }
+                    },
+                    onApprovalRequest = { request -> _generationApproval.value = request }
                 )
                 _currentTab.value = 3
                 _ideSubTab.value = 1
@@ -235,12 +266,14 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
                 _generationError.value = e.localizedMessage ?: "La génération du projet a échoué."
             } finally {
                 _isGenerating.value = false
+                _generationApproval.value = null
             }
         }
     }
 
     fun clearGenerationError() {
         _generationError.value = null
+        _generationApproval.value = null
     }
 
     fun sendMessage(content: String, targetAgent: AgentRole? = null) {
@@ -336,27 +369,18 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
 
     fun executeTerminalCommand(input: String) {
         val cmd = input.trim()
+        if (cmd.isBlank()) return
         val currentLogs = _terminalLogs.value.toMutableList()
         currentLogs.add("$ $cmd")
 
-        val parts = cmd.split(" ")
-        val mainCmd = parts.firstOrNull()?.lowercase() ?: ""
+        val mainCmd = cmd.substringBefore(' ').lowercase()
         when (mainCmd) {
             "help" -> {
-                currentLogs.add("Available here: tree, status, clear, help")
-                currentLogs.add("run/build/test/git are not connected to a real shell or repository in this app yet.")
-            }
-            "run", "serve" -> {
-                currentLogs.add("Not executed: this terminal is not connected to a shell. Export the project to run it in a real development environment.")
-            }
-            "build" -> {
-                currentLogs.add("Not executed: no project build toolchain is connected to this Android app.")
-            }
-            "test" -> {
-                currentLogs.add("Not executed: tests require a project-specific runner, which is not connected yet.")
+                currentLogs.add("Commandes locales : tree, status, clear, help")
+                currentLogs.add("Les autres commandes sont transmises à Hermes dans son workspace distant après activation d’un modèle Hermes dans le slot Code. Les fichiers locaux ne sont pas modifiés.")
             }
             "git" -> {
-                currentLogs.add("Not executed: this project workspace is not connected to a Git repository.")
+                currentLogs.add("Git local non connecté : aucun dépôt de l’application n’est exposé à ce terminal. Les opérations Git ne seraient pas effectuées sur votre dépôt local.")
             }
             "status" -> {
                 val project = selectedProject.value
@@ -376,9 +400,67 @@ class NuruViewModel(application: Application) : AndroidViewModel(application) {
                 currentLogs.clear()
             }
             else -> {
-                currentLogs.add("Command not found: $cmd. Type 'help' for available commands.")
+                if (redactSecrets(cmd) != cmd) {
+                    currentLogs.add("Commande non transmise : elle semble contenir un secret. Retirez la valeur sensible puis réessayez.")
+                } else if (_isTerminalRunning.value) {
+                    currentLogs.add("Une commande Hermes est déjà en cours.")
+                } else {
+                    _isTerminalRunning.value = true
+                    _terminalApproval.value = null
+                    currentLogs.add("Transmission au workspace Hermes distant…")
+                    _terminalLogs.value = currentLogs.takeLast(200)
+                    val snapshot = buildSanitizedTerminalSnapshot()
+                    viewModelScope.launch {
+                        try {
+                            val result = repository.runHermesTerminalCommand(
+                                command = cmd,
+                                projectSnapshot = snapshot,
+                                onStepUpdate = { step ->
+                                    _terminalLogs.value = (_terminalLogs.value + "• $step").takeLast(200)
+                                },
+                                onApprovalRequest = { request -> _terminalApproval.value = request }
+                            )
+                            result.fold(
+                                onSuccess = { output ->
+                                    _terminalLogs.value = (_terminalLogs.value + output.lines().filter { it.isNotBlank() }).takeLast(200)
+                                },
+                                onFailure = { error ->
+                                    _terminalLogs.value = (_terminalLogs.value + "Erreur : ${error.localizedMessage ?: "échec de l’exécution Hermes"}").takeLast(200)
+                                }
+                            )
+                        } finally {
+                            _isTerminalRunning.value = false
+                            _terminalApproval.value = null
+                        }
+                    }
+                    return
+                }
             }
         }
-        _terminalLogs.value = currentLogs
+        _terminalLogs.value = currentLogs.takeLast(200)
+    }
+
+    private fun buildSanitizedTerminalSnapshot(): String = buildString {
+        val project = selectedProject.value ?: return@buildString
+        appendLine("Project: ${project.name} (${project.type.displayName})")
+        appendLine("Description: ${project.description}")
+        var remaining = 24_000
+        project.files.forEach { file ->
+            val path = ProjectPathValidator.normalizeRelativePath(file.path) ?: return@forEach
+            val name = path.substringAfterLast('/').lowercase()
+            if (name.startsWith(".env") || name.contains("secret") || name.contains("credential") ||
+                name.endsWith(".pem") || name.endsWith(".key") || name.endsWith(".keystore") || name == "local.properties") {
+                appendLine("--- FILE $path : contenu sensible omis ---")
+                return@forEach
+            }
+            if (remaining <= 0) return@buildString
+            val safeContent = redactSecrets(file.content)
+            val snippet = safeContent.take(minOf(6_000, remaining))
+            appendLine("--- FILE $path ---")
+            appendLine(snippet)
+            if (snippet.length < safeContent.length) appendLine("[Contenu tronqué]")
+            remaining -= snippet.length
+        }
+        if (project.files.sumOf { it.content.length } > 24_000) appendLine("[Certains contenus de fichiers ont été omis ou tronqués]")
     }
 }

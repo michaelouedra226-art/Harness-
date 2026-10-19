@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.domain.model.HermesApprovalRequest
 import com.example.domain.model.ProjectType
 import com.example.ui.theme.*
 
@@ -27,7 +28,9 @@ fun CreateProjectDialog(
     generationStep: String,
     generationProgress: Float,
     generationError: String? = null,
+    approvalRequest: HermesApprovalRequest? = null,
     onDismiss: () -> Unit,
+    onResolveApproval: (HermesApprovalRequest, String) -> Unit = { _, _ -> },
     onConfirm: (name: String, desc: String, type: ProjectType) -> Unit
 ) {
     var projectName by remember { mutableStateOf("") }
@@ -108,6 +111,41 @@ fun CreateProjectDialog(
                         color = NuruViolet,
                         trackColor = SlateElevated
                     )
+                    approvalRequest?.let { request ->
+                        Surface(
+                            color = Graphite,
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFFC857))
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    "Hermes attend votre autorisation${request.toolName.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}",
+                                    style = MaterialTheme.typography.labelMedium.copy(color = Color(0xFFFFC857), fontWeight = FontWeight.Bold)
+                                )
+                                if (request.commandPreview.isNotBlank()) {
+                                    Text(request.commandPreview.take(600), style = MaterialTheme.typography.bodySmall.copy(color = Silver))
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if ("once" in request.availableChoices) {
+                                        Button(
+                                            onClick = { onResolveApproval(request, "once") },
+                                            colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+                                        ) { Text("Autoriser une fois", fontSize = 11.sp) }
+                                    }
+                                    if ("deny" in request.availableChoices) {
+                                        OutlinedButton(
+                                            onClick = { onResolveApproval(request, "deny") },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+                                        ) { Text("Refuser", fontSize = 11.sp) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 Column(

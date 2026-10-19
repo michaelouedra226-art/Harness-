@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -37,6 +39,8 @@ class MainActivity : ComponentActivity() {
                 val generationStep by viewModel.generationStep.collectAsState()
                 val generationProgress by viewModel.generationProgress.collectAsState()
                 val generationError by viewModel.generationError.collectAsState()
+                val generationApproval by viewModel.generationApproval.collectAsState()
+                val context = LocalContext.current
                 val models by viewModel.models.collectAsState()
                 val providers by viewModel.providers.collectAsState()
                 val routerConfig by viewModel.routerConfig.collectAsState()
@@ -136,9 +140,15 @@ class MainActivity : ComponentActivity() {
                                 generationStep = generationStep,
                                 generationProgress = generationProgress,
                                 generationError = generationError,
+                                approvalRequest = generationApproval,
                                 onDismiss = {
                                     showCreateDialog = false
                                     viewModel.clearGenerationError()
+                                },
+                                onResolveApproval = { request, choice ->
+                                    viewModel.respondToHermesApproval(request, choice) { error ->
+                                        if (error != null) Toast.makeText(context, "Approbation non transmise : $error", Toast.LENGTH_LONG).show()
+                                    }
                                 },
                                 onConfirm = { name, desc, type ->
                                     viewModel.createProjectWithOrchestration(

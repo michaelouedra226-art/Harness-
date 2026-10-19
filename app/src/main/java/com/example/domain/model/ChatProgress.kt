@@ -1,5 +1,13 @@
 package com.example.domain.model
 
+data class HermesApprovalRequest(
+    val runId: String,
+    val requestId: String,
+    val toolName: String,
+    val commandPreview: String,
+    val availableChoices: List<String>
+)
+
 /** Observable, factual progress for one live chat request. */
 data class ChatProgress(
     val stage: String,
@@ -11,5 +19,6 @@ data class ChatProgress(
     val providerLatencyMillis: Long? = null,
     val completedAtMillis: Long? = null,
     val isComplete: Boolean = false,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val approvalRequest: HermesApprovalRequest? = null
 )

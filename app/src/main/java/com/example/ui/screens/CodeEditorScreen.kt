@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.domain.model.AgentRole
+import com.example.domain.model.HermesApprovalRequest
 import com.example.domain.model.Project
 import com.example.domain.model.ProjectFile
 import com.example.domain.model.ProjectPathValidator
@@ -50,6 +51,8 @@ fun CodeEditorScreen(
     val activeFile by viewModel.activeFile.collectAsState()
     val ideSubTab by viewModel.ideSubTab.collectAsState()
     val terminalLogs by viewModel.terminalLogs.collectAsState()
+    val terminalApproval by viewModel.terminalApproval.collectAsState()
+    val isTerminalRunning by viewModel.isTerminalRunning.collectAsState()
     val context = LocalContext.current
 
     var editorContent by remember(activeFile) { mutableStateOf(activeFile?.content.orEmpty()) }
@@ -432,10 +435,59 @@ fun CodeEditorScreen(
                         .padding(12.dp)
                 ) {
                     Text(
-                        "Console interne : seules help, tree, status et clear sont exécutées. build, test, run et Git ne sont pas connectés.",
+                        "Terminal Hermes distant : les commandes agentiques nécessitent un modèle Hermes dans le slot Code. Le workspace distant n’est pas le terminal local et ne modifie pas les fichiers de l’application.",
                         style = MaterialTheme.typography.labelSmall.copy(color = AmberWarning),
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
+                    if (isTerminalRunning) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            color = NuruViolet,
+                            trackColor = SlateElevated
+                        )
+                    }
+                    terminalApproval?.let { request ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            color = Graphite,
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, AmberWarning)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    "Hermes demande une approbation · ${request.toolName.ifBlank { "outil" }}",
+                                    color = AmberWarning,
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                                )
+                                if (request.commandPreview.isNotBlank()) {
+                                    Text(request.commandPreview.take(600), color = Silver, style = MaterialTheme.typography.bodySmall)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if ("once" in request.availableChoices) {
+                                        Button(
+                                            onClick = {
+                                                viewModel.respondToHermesApproval(request, "once") { error ->
+                                                    if (error != null) android.widget.Toast.makeText(context, "Approbation non transmise : $error", android.widget.Toast.LENGTH_LONG).show()
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = NuruViolet),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) { Text("Autoriser une fois", fontSize = 11.sp) }
+                                    }
+                                    if ("deny" in request.availableChoices) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                viewModel.respondToHermesApproval(request, "deny") { error ->
+                                                    if (error != null) android.widget.Toast.makeText(context, "Refus non transmis : $error", android.widget.Toast.LENGTH_LONG).show()
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                        ) { Text("Refuser", fontSize = 11.sp) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     val quickCommands = listOf("help", "tree", "status", "clear")
                     LazyRow(
                         modifier = Modifier
@@ -507,7 +559,7 @@ fun CodeEditorScreen(
                         TextField(
                             value = terminalInput,
                             onValueChange = { terminalInput = it },
-                            placeholder = { Text("Commande interne (help, tree, status)...", fontSize = 12.sp, color = MutedText) },
+                            placeholder = { Text("Commande (ex. npm test, build, ls)...", fontSize = 12.sp, color = MutedText) },
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
@@ -519,9 +571,11 @@ fun CodeEditorScreen(
                             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             modifier = Modifier
                                 .weight(1f)
-                                .testTag("terminal_input_field")
+                                .testTag("terminal_input_field"),
+                            enabled = !isTerminalRunning
                         )
                         IconButton(
+                            enabled = !isTerminalRunning,
                             onClick = {
                                 if (terminalInput.isNotBlank()) {
                                     val cmd = terminalInput

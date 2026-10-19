@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -27,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import com.example.domain.model.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.NuruViewModel
+import android.widget.Toast
 
 @Composable
 fun StudioHubScreen(
@@ -44,6 +48,8 @@ fun StudioHubScreen(
     var testingModel by remember { mutableStateOf<AIModel?>(null) }
     var slotToEdit by remember { mutableStateOf<RouterSlotType?>(null) }
     var editingKeyProvider by remember { mutableStateOf<AIProvider?>(null) }
+    var hermesProviderToActivate by remember { mutableStateOf<AIProvider?>(null) }
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -145,7 +151,21 @@ fun StudioHubScreen(
                                 provider = provider,
                                 onTest = { viewModel.testProvider(provider.id) },
                                 onEditKey = { editingKeyProvider = provider },
-                                onDelete = { viewModel.deleteProvider(provider.id) }
+                                onDelete = { viewModel.deleteProvider(provider.id) },
+                                onActivateHermes = if (provider.type == ProviderType.HERMES_AGENT) {
+                                    {
+                                        val providerModels = models.filter { it.providerId == provider.id }
+                                        when (providerModels.size) {
+                                            0 -> Toast.makeText(context, "Testez Hermes pour découvrir ses modèles avant l’activation.", Toast.LENGTH_LONG).show()
+                                            1 -> {
+                                                if (viewModel.activateHermesForEntireApp(providerModels.first().id)) {
+                                                    Toast.makeText(context, "Hermes est maintenant le moteur de tous les rôles et tâches.", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                            else -> hermesProviderToActivate = provider
+                                        }
+                                    }
+                                } else null
                             )
                         }
                     }
@@ -396,6 +416,43 @@ fun StudioHubScreen(
             }
         )
     }
+
+    hermesProviderToActivate?.let { provider ->
+        val providerModels = models.filter { it.providerId == provider.id }
+        AlertDialog(
+            onDismissRequest = { hermesProviderToActivate = null },
+            containerColor = Obsidian,
+            title = { Text("Activer Hermes dans toute l’application", color = PureWhite, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Choisissez le modèle Hermes qui sera utilisé par le chat, les profils de rôle et la création de projets. Vous pourrez ensuite modifier chaque slot dans AI Router.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = Silver)
+                    )
+                    Column(
+                        modifier = Modifier.heightIn(max = 340.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        providerModels.forEach { model ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    val activated = viewModel.activateHermesForEntireApp(model.id)
+                                    if (activated) Toast.makeText(context, "${model.name} est actif dans toute l’application.", Toast.LENGTH_LONG).show()
+                                    hermesProviderToActivate = null
+                                },
+                                color = Graphite,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, GlassBorder)
+                            ) {
+                                Text(model.name, modifier = Modifier.padding(12.dp), color = PureWhite)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { hermesProviderToActivate = null }) { Text("Annuler", color = Silver) } }
+        )
+    }
 }
 
 @Composable
@@ -468,7 +525,8 @@ fun ProviderCard(
     provider: AIProvider,
     onTest: () -> Unit,
     onEditKey: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onActivateHermes: (() -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -609,6 +667,18 @@ fun ProviderCard(
                         Spacer(modifier = Modifier.width(3.dp))
                         Text("Tester", fontSize = 10.sp, color = PureWhite)
                     }
+                }
+            }
+            if (onActivateHermes != null && provider.testStatus == TestStatus.SUCCESS && provider.modelsCount > 0) {
+                OutlinedButton(
+                    onClick = onActivateHermes,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    border = BorderStroke(1.dp, NuruViolet)
+                ) {
+                    Icon(Icons.Default.Hub, contentDescription = null, modifier = Modifier.size(15.dp), tint = NebulaBlue)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Activer Hermes pour toute l’application", fontSize = 11.sp, color = PureWhite)
                 }
             }
         }
